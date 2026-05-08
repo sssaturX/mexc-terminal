@@ -1,0 +1,33 @@
+{
+  "authToken": "WEB_YOUR_TOKEN_HERE",
+  "symbol": "TONCOIN_USDT",
+  "symbolHistory": [
+    "TONCOIN_USDT",
+    "BTC_USDT",
+    "ETH_USDT",
+    "SOL_USDT"
+  ],
+  "margin": 10,
+  "leverage": 10,
+  "directionMode": "auto",
+  "takeProfitPercent": 2,
+  "stopLossPercent": 0.15,
+  "manualStopLossRoePercent": 1,
+  "trailingTakeProfit": {
+    "enabled": true,
+    "activationProfitPercent": 0.1,
+    "distancePercent": 0.05
+  },
+  "chasingTakeProfit": {
+    "enabled": true,
+    "activationProfitPercent": 0.1,
+    "chaseDistancePercent": 0.05
+  },
+  "maxTradesPerSession": 5,
+  "maxConsecutiveLosses": 1,
+  "maxDailyLoss": 5,
+  "cooldownMs": 0,
+  "dryRun": true,
+  "tickIntervalMs": 2000,
+  "debug": true
+}

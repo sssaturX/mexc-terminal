@@ -1,0 +1,34 @@
+{
+  "name": "mexc-terminal-bot",
+  "version": "1.0.0",
+  "description": "Console MEXC Futures trading bot with dry-run, risk limits and pluggable strategies.",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "web": "ts-node src/web/server.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:web": "node dist/web/server.js",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "mexc",
+    "futures",
+    "trading",
+    "bot",
+    "typescript"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "mexc-futures-sdk": "^1.5.1",
+    "prompts": "^2.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/prompts": "^2.4.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

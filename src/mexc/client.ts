@@ -37,6 +37,94 @@ export class MexcClient {
     }
   }
 
+  async getTickerSnapshot(symbol: string): Promise<{
+    symbol: string;
+    lastPrice: number;
+    bid1?: number;
+    ask1?: number;
+    volume24?: number;
+    amount24?: number;
+    holdVol?: number;
+    fairPrice?: number;
+    indexPrice?: number;
+    fundingRate?: number;
+    riseFallRate?: number;
+    timestamp: number;
+    raw: unknown;
+  }> {
+    try {
+      const response = await this.client.getTicker(symbol);
+      const data = unwrapData(response);
+      const lastPrice = pickNumber(data, ["lastPrice", "last", "price", "fairPrice", "indexPrice"]);
+      if (lastPrice === undefined) {
+        throw new Error(`Ticker response does not contain a recognizable price for ${symbol}`);
+      }
+      return {
+        symbol,
+        lastPrice,
+        bid1: pickNumber(data, ["bid1", "bid", "bestBid"]),
+        ask1: pickNumber(data, ["ask1", "ask", "bestAsk"]),
+        volume24: pickNumber(data, ["volume24", "volume"]),
+        amount24: pickNumber(data, ["amount24", "amount"]),
+        holdVol: pickNumber(data, ["holdVol", "openInterest"]),
+        fairPrice: pickNumber(data, ["fairPrice"]),
+        indexPrice: pickNumber(data, ["indexPrice"]),
+        fundingRate: pickNumber(data, ["fundingRate"]),
+        riseFallRate: pickNumber(data, ["riseFallRate"]),
+        timestamp: pickNumber(data, ["timestamp", "ts"]) ?? Date.now(),
+        raw: data
+      };
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("Ticker response does not contain a recognizable price")) {
+        this.logSdkError(error);
+      }
+      throw error;
+    }
+  }
+
+  async getAllContractDetails(): Promise<Array<ContractDetail & {
+    symbol: string;
+    displayName?: string;
+    priceUnit?: number;
+    maxLeverage?: number;
+    state?: number;
+    isNew?: boolean;
+    isHot?: boolean;
+    isHidden?: boolean;
+    apiAllowed?: boolean;
+    makerFeeRate?: number;
+    takerFeeRate?: number;
+  }>> {
+    try {
+      const response = await this.client.getContractDetail();
+      const data = unwrapData(response);
+      const details = Array.isArray(data) ? data : [data];
+      return details.filter(isRecord).map((detail) => ({
+        symbol: String(detail.symbol ?? ""),
+        minVol: pickNumber(detail, ["minVol", "minVolume", "minOrderVol"]),
+        maxVol: pickNumber(detail, ["maxVol", "maxVolume", "maxOrderVol"]),
+        volUnit: pickNumber(detail, ["volUnit", "volumeStep", "stepSize"]),
+        volumeScale: pickNumber(detail, ["volScale", "volumeScale", "quantityScale"]),
+        priceScale: pickNumber(detail, ["priceScale"]),
+        contractSize: pickNumber(detail, ["contractSize", "contractUnit"]),
+        displayName: pickString(detail, ["displayName", "displayNameEn"]),
+        priceUnit: pickNumber(detail, ["priceUnit"]),
+        maxLeverage: pickNumber(detail, ["maxLeverage"]),
+        state: pickNumber(detail, ["state"]),
+        isNew: pickBoolean(detail, ["isNew"]),
+        isHot: pickBoolean(detail, ["isHot"]),
+        isHidden: pickBoolean(detail, ["isHidden"]),
+        apiAllowed: pickBoolean(detail, ["apiAllowed"]),
+        makerFeeRate: pickNumber(detail, ["makerFeeRate"]),
+        takerFeeRate: pickNumber(detail, ["takerFeeRate"]),
+        raw: detail
+      })).filter((detail) => detail.symbol.length > 0);
+    } catch (error) {
+      this.logSdkError(error);
+      return [];
+    }
+  }
+
   async getOrderBook(symbol: string, limit = 20): Promise<OrderBook | undefined> {
     try {
       const response = await this.client.getContractDepth(symbol, limit);
@@ -256,7 +344,7 @@ function parseDepthSide(side: unknown[] | undefined): DepthLevel[] {
     .map((level): DepthLevel | undefined => {
       if (Array.isArray(level)) {
         const price = Number(level[0]);
-        const volume = Number(level[1]);
+        const volume = Number(level[2] ?? level[1]);
         return Number.isFinite(price) && Number.isFinite(volume) ? { price, volume } : undefined;
       }
       if (isRecord(level)) {
@@ -267,6 +355,30 @@ function parseDepthSide(side: unknown[] | undefined): DepthLevel[] {
       return undefined;
     })
     .filter((level): level is DepthLevel => level !== undefined);
+}
+
+function pickBoolean(record: unknown, keys: string[]): boolean | undefined {
+  if (!isRecord(record)) {
+    return undefined;
+  }
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") {
+      return value;
+    }
+    if (typeof value === "number") {
+      return value !== 0;
+    }
+    if (typeof value === "string") {
+      if (value.toLowerCase() === "true") {
+        return true;
+      }
+      if (value.toLowerCase() === "false") {
+        return false;
+      }
+    }
+  }
+  return undefined;
 }
 
 function unwrapData(value: unknown): unknown {

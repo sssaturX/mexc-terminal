@@ -13,11 +13,13 @@ const LEVEL_WEIGHT: Record<LogLevel, number> = {
 export class Logger {
   private readonly logPath: string;
   private readonly minLevel: LogLevel;
+  private readonly prefix?: string;
   private readonly listeners = new Set<(entry: { level: LogLevel; message: string; timestamp: string }) => void>();
 
-  constructor(options?: { logPath?: string; minLevel?: LogLevel }) {
+  constructor(options?: { logPath?: string; minLevel?: LogLevel; prefix?: string }) {
     this.logPath = options?.logPath ?? path.join(process.cwd(), "logs", "trading.log");
     this.minLevel = options?.minLevel ?? "INFO";
+    this.prefix = options?.prefix;
     fs.mkdirSync(path.dirname(this.logPath), { recursive: true });
   }
 
@@ -47,8 +49,9 @@ export class Logger {
       return;
     }
 
-    const plainText = `[${level}] ${stripAnsi(message)}${meta === undefined ? "" : ` ${this.formatMeta(meta)}`}`;
-    const text = `${this.colorLevel(level)} ${message}${meta === undefined ? "" : ` ${this.formatMeta(meta)}`}`;
+    const prefixedMessage = this.prefix ? `[${this.prefix}] ${message}` : message;
+    const plainText = `[${level}] ${stripAnsi(prefixedMessage)}${meta === undefined ? "" : ` ${this.formatMeta(meta)}`}`;
+    const text = `${this.colorLevel(level)} ${prefixedMessage}${meta === undefined ? "" : ` ${this.formatMeta(meta)}`}`;
     if (level === "ERROR") {
       console.error(text);
     } else if (level === "WARN") {

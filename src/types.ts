@@ -77,6 +77,9 @@ export interface ChasingTakeProfitConfig {
 }
 
 export interface BotConfig {
+  accountId?: string;
+  accountName?: string;
+  accountRole?: "master" | "slave";
   authToken: string;
   symbol: string;
   margin: number;

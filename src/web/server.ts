@@ -9,12 +9,43 @@ import { PositionManager } from "../core/position-manager";
 import { RiskManager } from "../core/risk-manager";
 import { TradingEngine } from "../core/trading-engine";
 import { MexcClient } from "../mexc/client";
+import { ScannerEngine } from "../scanner/scanner-engine";
+import { ScannerConfig } from "../scanner/types";
 import { createStrategy, STRATEGY_FACTORIES } from "../strategies";
 import { BotConfig, DirectionMode } from "../types";
 
 type SavedWebConfig = Omit<BotConfig, "strategyName" | "strategyParams"> & {
+  accounts?: SavedWebAccount[];
+  masterAccountId?: string;
+  scanner?: SavedScannerConfig;
   symbolHistory?: string[];
 };
+
+interface SavedWebAccount {
+  id: string;
+  name: string;
+  authToken: string;
+  role: "master" | "slave";
+}
+
+interface AccountRuntime {
+  account: SavedWebAccount;
+  config: BotConfig;
+  engine: TradingEngine;
+  unsubscribeLogs: () => void;
+}
+
+interface SavedScannerConfig {
+  symbols?: string[];
+  strictZeroFee?: boolean;
+  executionMode?: "scanner" | "semi_auto";
+  equityUsdt?: number;
+  riskPct?: number;
+  leverage?: number;
+  maxFocusedSymbols?: number;
+  minGrade?: "B" | "A" | "A+";
+  tickIntervalMs?: number;
+}
 
 interface StrategySchema {
   name: string;
@@ -103,9 +134,9 @@ const strategySchemas: StrategySchema[] = [
   schema("ManualConsoleStrategy", [])
 ];
 
-let engine: TradingEngine | undefined;
-let logger: Logger | undefined;
-let unsubscribeLogs: (() => void) | undefined;
+let runtimes: AccountRuntime[] = [];
+let scanner: ScannerEngine | undefined;
+let unsubscribeScannerLogs: (() => void) | undefined;
 const clients = new Set<ServerResponse>();
 const recentLogs: Array<{ level: string; message: string; timestamp: string }> = [];
 
@@ -119,6 +150,7 @@ server.listen(PORT, "127.0.0.1", () => {
 
 setInterval(() => {
   broadcast("status", currentStatus());
+  broadcast("scanner", currentScannerStatus());
 }, 1000).unref();
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -131,7 +163,8 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       saved: readSaved(),
       symbols: buildSymbols(readSaved()),
       strategies: strategySchemas,
-      running: Boolean(engine),
+      running: runtimes.length > 0,
+      scanner: currentScannerStatus(),
       status: currentStatus()
     });
   }
@@ -144,15 +177,42 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     await stopBot();
     return sendJson(res, 200, { ok: true, status: currentStatus() });
   }
+  if (url.pathname === "/api/scanner/start" && req.method === "POST") {
+    const body = await readJson(req);
+    await startScanner(body as Record<string, unknown>);
+    return sendJson(res, 200, { ok: true, scanner: currentScannerStatus() });
+  }
+  if (url.pathname === "/api/scanner/stop" && req.method === "POST") {
+    await stopScanner();
+    return sendJson(res, 200, { ok: true, scanner: currentScannerStatus() });
+  }
+  if (url.pathname === "/api/scanner/status") {
+    return sendJson(res, 200, currentScannerStatus());
+  }
+  if (url.pathname === "/api/scanner/execute" && req.method === "POST") {
+    const body = (await readJson(req)) as { alertId?: string };
+    if (!scanner) {
+      return sendJson(res, 409, { error: "Scanner is not running" });
+    }
+    if (!body.alertId) {
+      return sendJson(res, 400, { error: "alertId is required" });
+    }
+    const alert = await scanner.executeAlert(body.alertId);
+    broadcast("scanner", currentScannerStatus());
+    return sendJson(res, 200, { ok: true, alert });
+  }
   if (url.pathname === "/api/manual" && req.method === "POST") {
     const body = (await readJson(req)) as { action?: "BUY" | "SELL" | "CLOSE" };
-    if (!engine) {
+    if (runtimes.length === 0) {
       return sendJson(res, 409, { error: "Bot is not running" });
     }
     if (body.action !== "BUY" && body.action !== "SELL" && body.action !== "CLOSE") {
       return sendJson(res, 400, { error: "Invalid manual action" });
     }
-    engine.queueManual(body.action, "Manual web control");
+    const targets = runtimes.length > 1 ? runtimes.filter((runtime) => runtime.account.role === "master") : runtimes;
+    for (const runtime of targets) {
+      runtime.engine.queueManual(body.action, "Manual web control");
+    }
     return sendJson(res, 200, { ok: true });
   }
   if (url.pathname.startsWith("/api/")) {
@@ -162,47 +222,114 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   return serveStatic(url.pathname, res);
 }
 
-async function startBot(input: Record<string, unknown>): Promise<void> {
-  if (engine) {
-    throw new Error("Bot is already running");
+async function startScanner(input: Record<string, unknown>): Promise<void> {
+  if (scanner) {
+    throw new Error("Scanner is already running");
   }
-
-  const config = buildConfig(input);
-  validateConfig(config, Boolean(input.liveConfirmed));
-  saveConfig(config);
-
-  logger = new Logger({ minLevel: config.debug ? "DEBUG" : "INFO" });
-  unsubscribeLogs = logger.onLog((entry) => {
+  const config = buildScannerConfig(input);
+  const logger = new Logger({ minLevel: config.debug ? "DEBUG" : "INFO", prefix: "Scanner" });
+  unsubscribeScannerLogs = logger.onLog((entry) => {
     recentLogs.push(entry);
     if (recentLogs.length > 300) {
       recentLogs.shift();
     }
     broadcast("log", entry);
   });
-  logger.info(formatConfigCard(config));
+  scanner = new ScannerEngine(config, logger, () => broadcast("scanner", currentScannerStatus()));
+  await scanner.start();
+  broadcast("scanner", currentScannerStatus());
+}
 
-  const mexc = new MexcClient(config.authToken, config.dryRun, logger);
-  const strategy = createStrategy(config.strategyName, config.strategyParams);
-  const positions = new PositionManager(logger);
-  const risk = new RiskManager(config, logger);
-  engine = new TradingEngine(config, mexc, strategy, positions, risk, logger);
+async function stopScanner(): Promise<void> {
+  const current = scanner;
+  scanner = undefined;
+  if (current) {
+    await current.stop();
+  }
+  unsubscribeScannerLogs?.();
+  unsubscribeScannerLogs = undefined;
+  broadcast("scanner", currentScannerStatus());
+}
 
-  void engine.start().catch((error) => {
-    logger?.error("Web bot stopped after fatal error", error);
-    engine = undefined;
-    broadcast("status", currentStatus());
+async function startBot(input: Record<string, unknown>): Promise<void> {
+  if (runtimes.length > 0) {
+    throw new Error("Bot is already running");
+  }
+
+  const baseConfig = buildConfig(input);
+  const accounts = buildAccounts(input, baseConfig.authToken);
+  validateConfig(baseConfig, accounts, Boolean(input.liveConfirmed));
+  saveConfig(baseConfig, accounts);
+
+  runtimes = accounts.map((account) => {
+    const config: BotConfig = {
+      ...baseConfig,
+      accountId: account.id,
+      accountName: account.name,
+      accountRole: account.role,
+      authToken: account.authToken
+    };
+    const logger = new Logger({ minLevel: config.debug ? "DEBUG" : "INFO", prefix: account.name });
+    const unsubscribeLogs = logger.onLog((entry) => {
+      recentLogs.push(entry);
+      if (recentLogs.length > 300) {
+        recentLogs.shift();
+      }
+      broadcast("log", entry);
+    });
+    logger.info(formatConfigCard(config));
+
+    const mexc = new MexcClient(config.authToken, config.dryRun, logger);
+    const strategy =
+      account.role === "master"
+        ? createStrategy(config.strategyName, config.strategyParams)
+        : createStrategy("ManualConsoleStrategy", {});
+    const positions = new PositionManager(logger);
+    const risk = new RiskManager(config, logger);
+    const engine = new TradingEngine(config, mexc, strategy, positions, risk, logger, {
+      enableKeyboardControls: false,
+      onTradeAction:
+        account.role === "master"
+          ? (action, reason) => {
+              for (const runtime of runtimes) {
+                if (runtime.account.role === "slave") {
+                  runtime.engine.queueManual(action, `Master ${account.name}: ${reason}`);
+                }
+              }
+            }
+          : undefined
+    });
+    return { account, config, engine, unsubscribeLogs };
   });
+
+  for (const runtime of runtimes) {
+    void runtime.engine.start().catch((error) => {
+      const fallbackLogger = new Logger({ minLevel: runtime.config.debug ? "DEBUG" : "INFO", prefix: runtime.account.name });
+      fallbackLogger.error("Web bot stopped after fatal error", error);
+      runtimes = runtimes.filter((item) => item !== runtime);
+      runtime.unsubscribeLogs();
+      broadcast("status", currentStatus());
+    });
+  }
+  if (accounts.length > 1) {
+    broadcast("log", {
+      level: "INFO",
+      message: `[INFO] Account group started with ${accounts.length} accounts; ${accounts.find((account) => account.role === "master")?.name ?? accounts[0]?.name} is master`,
+      timestamp: new Date().toISOString()
+    });
+    broadcast("status", currentStatus());
+  }
 }
 
 async function stopBot(): Promise<void> {
-  if (engine) {
-    const current = engine;
-    engine = undefined;
-    await current.stop("SHUTDOWN");
+  if (runtimes.length > 0) {
+    const current = runtimes;
+    runtimes = [];
+    await Promise.all(current.map((runtime) => runtime.engine.stop("SHUTDOWN")));
+    for (const runtime of current) {
+      runtime.unsubscribeLogs();
+    }
   }
-  unsubscribeLogs?.();
-  unsubscribeLogs = undefined;
-  logger = undefined;
   broadcast("status", currentStatus());
 }
 
@@ -244,9 +371,79 @@ function buildConfig(input: Record<string, unknown>): BotConfig {
   return config;
 }
 
-function validateConfig(config: BotConfig, liveConfirmed: boolean): void {
-  if (!config.authToken) {
-    throw new Error("WEB token is required");
+function buildScannerConfig(input: Record<string, unknown>): ScannerConfig {
+  const saved = readSaved();
+  const fallbackToken = String(input.authToken ?? saved?.authToken ?? process.env.MEXC_WEB_AUTH_TOKEN ?? "").trim();
+  const accounts = buildAccounts(input.accounts ? input : { ...input, accounts: saved?.accounts, masterAccountId: saved?.masterAccountId }, fallbackToken);
+  const scannerInput = typeof input.scanner === "object" && input.scanner !== null ? (input.scanner as Record<string, unknown>) : input;
+  const symbols = parseSymbolList(scannerInput.symbols ?? saved?.scanner?.symbols ?? saved?.symbolHistory ?? saved?.symbol ?? "BTC_USDT,ETH_USDT,SOL_USDT,DOGE_USDT,PEPE_USDT");
+  const config: ScannerConfig = {
+    accounts,
+    masterAccountId: String(input.masterAccountId ?? saved?.masterAccountId ?? accounts.find((account) => account.role === "master")?.id ?? accounts[0]?.id ?? ""),
+    symbols,
+    strictZeroFee: booleanValue(scannerInput.strictZeroFee, saved?.scanner?.strictZeroFee ?? false),
+    executionMode: String(scannerInput.executionMode ?? saved?.scanner?.executionMode ?? "scanner") === "semi_auto" ? "semi_auto" : "scanner",
+    dryRun: booleanValue(scannerInput.dryRun, saved?.dryRun ?? true),
+    equityUsdt: positiveNumber(scannerInput.equityUsdt ?? saved?.scanner?.equityUsdt, 75),
+    riskPct: positiveNumber(scannerInput.riskPct ?? saved?.scanner?.riskPct, 1.2) / 100,
+    leverage: positiveNumber(scannerInput.leverage ?? saved?.scanner?.leverage, 15),
+    maxFocusedSymbols: Math.max(1, Math.min(20, positiveNumber(scannerInput.maxFocusedSymbols ?? saved?.scanner?.maxFocusedSymbols, 12))),
+    minGrade: String(scannerInput.minGrade ?? saved?.scanner?.minGrade ?? "A") === "A+" ? "A+" : String(scannerInput.minGrade ?? saved?.scanner?.minGrade ?? "A") === "B" ? "B" : "A",
+    tickIntervalMs: positiveNumber(scannerInput.tickIntervalMs ?? saved?.scanner?.tickIntervalMs, 2000),
+    debug: booleanValue(scannerInput.debug, saved?.debug ?? false)
+  };
+  saveScannerConfig(config);
+  return config;
+}
+
+function buildAccounts(input: Record<string, unknown>, fallbackToken: string): SavedWebAccount[] {
+  const masterAccountId = String(input.masterAccountId ?? "").trim();
+  const rawAccounts = Array.isArray(input.accounts) ? input.accounts : [];
+  const accounts = rawAccounts
+    .map((item, index): SavedWebAccount | undefined => {
+      if (typeof item !== "object" || item === null) {
+        return undefined;
+      }
+      const record = item as Record<string, unknown>;
+      const id = String(record.id ?? `account-${index + 1}`).trim() || `account-${index + 1}`;
+      const name = String(record.name ?? `Account ${index + 1}`).trim() || `Account ${index + 1}`;
+      const authToken = String(record.authToken ?? "").trim();
+      if (!authToken) {
+        return undefined;
+      }
+      return {
+        id,
+        name,
+        authToken,
+        role: id === masterAccountId || record.role === "master" ? "master" : "slave"
+      };
+    })
+    .filter((account): account is SavedWebAccount => account !== undefined);
+
+  if (accounts.length === 0 && fallbackToken) {
+    accounts.push({
+      id: "master",
+      name: "Master",
+      authToken: fallbackToken,
+      role: "master"
+    });
+  }
+
+  if (accounts.length === 0) {
+    throw new Error("At least one account with a WEB token is required");
+  }
+
+  const explicitMaster = accounts.find((account) => account.id === masterAccountId) ?? accounts.find((account) => account.role === "master");
+  const master = explicitMaster ?? accounts[0];
+  return accounts.map((account) => ({
+    ...account,
+    role: account.id === master.id ? "master" : "slave"
+  }));
+}
+
+function validateConfig(config: BotConfig, accounts: SavedWebAccount[], liveConfirmed: boolean): void {
+  if (!accounts.some((account) => account.authToken)) {
+    throw new Error("At least one WEB token is required");
   }
   if (!/^[A-Z0-9]+_[A-Z0-9]+$/.test(config.symbol)) {
     throw new Error("Symbol must look like BTC_USDT");
@@ -260,10 +457,89 @@ function validateConfig(config: BotConfig, liveConfirmed: boolean): void {
 }
 
 function currentStatus(): unknown {
-  if (!engine) {
-    return { running: false };
+  if (runtimes.length === 0) {
+    return {
+      running: false,
+      accounts: [],
+      aggregate: {
+        accounts: 0,
+        activePositions: 0,
+        unrealizedPnl: 0,
+        realizedPnl: 0,
+        totalPnl: 0,
+        roiPercent: 0,
+        margin: 0,
+        tradesOpened: 0,
+        wins: 0,
+        losses: 0
+      }
+    };
   }
-  return engine.getSnapshot();
+
+  const accounts = runtimes.map((runtime) => {
+    const snapshot = runtime.engine.getSnapshot();
+    const realizedPnl = snapshot.risk.dailyPnl;
+    const totalPnl = realizedPnl + snapshot.unrealizedPnl;
+    return {
+      id: runtime.account.id,
+      name: runtime.account.name,
+      role: runtime.account.role,
+      margin: runtime.config.margin,
+      roiPercent: runtime.config.margin === 0 ? 0 : (totalPnl / runtime.config.margin) * 100,
+      realizedPnl,
+      totalPnl,
+      ...snapshot
+    };
+  });
+
+  const aggregateMargin = accounts.reduce((sum, account) => sum + account.margin, 0);
+  const aggregate = {
+    accounts: accounts.length,
+    activePositions: accounts.filter((account) => account.position).length,
+    unrealizedPnl: accounts.reduce((sum, account) => sum + account.unrealizedPnl, 0),
+    realizedPnl: accounts.reduce((sum, account) => sum + account.realizedPnl, 0),
+    totalPnl: accounts.reduce((sum, account) => sum + account.totalPnl, 0),
+    roiPercent: 0,
+    margin: aggregateMargin,
+    tradesOpened: accounts.reduce((sum, account) => sum + account.risk.tradesOpened, 0),
+    wins: accounts.reduce((sum, account) => sum + account.risk.wins, 0),
+    losses: accounts.reduce((sum, account) => sum + account.risk.losses, 0)
+  };
+  aggregate.roiPercent = aggregateMargin === 0 ? 0 : (aggregate.totalPnl / aggregateMargin) * 100;
+
+  const master = accounts.find((account) => account.role === "master") ?? accounts[0];
+  return {
+    running: accounts.some((account) => account.running),
+    dryRun: master?.dryRun ?? true,
+    symbol: master?.symbol,
+    strategy: master?.strategy,
+    price: master?.price,
+    position: master?.position,
+    unrealizedPnl: aggregate.unrealizedPnl,
+    unrealizedPnlPercent: aggregate.roiPercent,
+    risk: {
+      tradesOpened: aggregate.tradesOpened,
+      wins: aggregate.wins,
+      losses: aggregate.losses,
+      consecutiveLosses: accounts.reduce((sum, account) => sum + account.risk.consecutiveLosses, 0),
+      dailyPnl: aggregate.realizedPnl,
+      emergencyCloseRequested: accounts.some((account) => account.risk.emergencyCloseRequested)
+    },
+    aggregate,
+    accounts
+  };
+}
+
+function currentScannerStatus(): unknown {
+  return scanner?.getStatus() ?? {
+    running: false,
+    wsConnected: false,
+    mode: "scanner",
+    dryRun: true,
+    focusedSymbols: [],
+    topSymbols: [],
+    alerts: []
+  };
 }
 
 function readSaved(): SavedWebConfig | undefined {
@@ -273,12 +549,45 @@ function readSaved(): SavedWebConfig | undefined {
   return JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8")) as SavedWebConfig;
 }
 
-function saveConfig(config: BotConfig): void {
+function saveConfig(config: BotConfig, accounts: SavedWebAccount[]): void {
   const previous = readSaved();
-  const { strategyName: _strategyName, strategyParams: _strategyParams, ...saved } = config;
+  const {
+    strategyName: _strategyName,
+    strategyParams: _strategyParams,
+    accountId: _accountId,
+    accountName: _accountName,
+    accountRole: _accountRole,
+    ...saved
+  } = config;
+  const master = accounts.find((account) => account.role === "master") ?? accounts[0];
   const next = {
     ...saved,
+    authToken: master?.authToken ?? saved.authToken,
+    accounts,
+    masterAccountId: master?.id,
     symbolHistory: Array.from(new Set([config.symbol, ...(previous?.symbolHistory ?? []), previous?.symbol].filter(Boolean))).slice(0, 10)
+  };
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
+function saveScannerConfig(config: ScannerConfig): void {
+  const previous = readSaved();
+  const next: SavedWebConfig = {
+    ...(previous ?? {} as SavedWebConfig),
+    accounts: config.accounts,
+    masterAccountId: config.masterAccountId,
+    scanner: {
+      symbols: config.symbols,
+      strictZeroFee: config.strictZeroFee,
+      executionMode: config.executionMode,
+      equityUsdt: config.equityUsdt,
+      riskPct: config.riskPct * 100,
+      leverage: config.leverage,
+      maxFocusedSymbols: config.maxFocusedSymbols,
+      minGrade: config.minGrade,
+      tickIntervalMs: config.tickIntervalMs
+    }
   };
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
   fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
@@ -295,6 +604,7 @@ function handleEvents(res: ServerResponse): void {
     sendEvent(res, "log", entry);
   }
   sendEvent(res, "status", currentStatus());
+  sendEvent(res, "scanner", currentScannerStatus());
   res.on("close", () => clients.delete(res));
 }
 
@@ -377,8 +687,30 @@ function positiveNumber(value: unknown, fallback: number): number {
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : fallback;
 }
 
+function booleanValue(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "string") {
+    return value === "true" || value === "on" || value === "1";
+  }
+  return fallback;
+}
+
 function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
+}
+
+function parseSymbolList(value: unknown): string[] {
+  const raw = Array.isArray(value) ? value.join(",") : String(value ?? "");
+  return Array.from(
+    new Set(
+      raw
+        .split(/[,\s]+/)
+        .map((symbol) => normalizeSymbol(symbol))
+        .filter((symbol) => /^[A-Z0-9]+_[A-Z0-9]+$/.test(symbol))
+    )
+  );
 }
 
 function buildSymbols(saved?: SavedWebConfig): string[] {

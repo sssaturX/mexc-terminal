@@ -22,15 +22,15 @@
           <strong id="price">-</strong>
         </article>
         <article class="metric">
-          <span>Position</span>
+          <span>Accounts</span>
           <strong id="position">none</strong>
         </article>
         <article class="metric">
-          <span>Unrealized PnL</span>
+          <span>Combined PnL</span>
           <strong id="pnl">0.0000 USDT</strong>
         </article>
         <article class="metric">
-          <span>Trades / W-L</span>
+          <span>ROI / W-L</span>
           <strong id="trades">0 / 0-0</strong>
         </article>
       </section>
@@ -42,11 +42,15 @@
             <button type="button" class="ghost" id="reloadSaved">Reload</button>
           </div>
 
+          <div class="section-title">Accounts</div>
+          <input name="authToken" type="hidden" />
+          <div class="account-toolbar">
+            <span>Choose one master account. Slave accounts mirror master opens and closes.</span>
+            <button type="button" class="ghost" id="addAccount">Add account</button>
+          </div>
+          <div id="accountsList" class="accounts-list"></div>
+
           <div class="grid two">
-            <label>
-              <span>WEB token</span>
-              <input name="authToken" type="password" autocomplete="off" />
-            </label>
             <label>
               <span>Symbol</span>
               <div class="inline">
@@ -167,9 +171,82 @@
             <button type="submit" class="primary" id="startBtn">Start bot</button>
             <button type="button" class="danger" id="stopBtn">Stop</button>
           </div>
+
+          <div class="section-title">Scanner</div>
+          <div class="grid two">
+            <label>
+              <span>Scanner symbols</span>
+              <textarea name="scannerSymbols" rows="3" placeholder="BTC_USDT, ETH_USDT, SOL_USDT, DOGE_USDT, PEPE_USDT"></textarea>
+            </label>
+            <label>
+              <span>Execution mode</span>
+              <select name="scannerExecutionMode">
+                <option value="scanner">Scanner only</option>
+                <option value="semi_auto">Execute on group</option>
+              </select>
+            </label>
+            <label>
+              <span>Equity USDT</span>
+              <input name="scannerEquityUsdt" type="number" min="1" step="0.1" />
+            </label>
+            <label>
+              <span>Risk % per alert</span>
+              <input name="scannerRiskPct" type="number" min="0.1" step="0.1" />
+            </label>
+            <label>
+              <span>Scanner leverage</span>
+              <input name="scannerLeverage" type="number" min="1" max="200" step="1" />
+            </label>
+            <label>
+              <span>Focused symbols</span>
+              <input name="scannerMaxFocusedSymbols" type="number" min="1" max="20" step="1" />
+            </label>
+            <label>
+              <span>Minimum grade</span>
+              <select name="scannerMinGrade">
+                <option value="A">A</option>
+                <option value="A+">A+</option>
+                <option value="B">B</option>
+              </select>
+            </label>
+            <label>
+              <span>Scanner tick ms</span>
+              <input name="scannerTickIntervalMs" type="number" min="1000" step="250" />
+            </label>
+            <label class="check"><input name="scannerStrictZeroFee" type="checkbox" /> Strict zero-fee symbols</label>
+          </div>
+
+          <div class="actions">
+            <button type="button" class="primary" id="startScannerBtn">Start scanner</button>
+            <button type="button" class="danger" id="stopScannerBtn">Stop scanner</button>
+          </div>
         </form>
 
         <aside class="side">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Scanner</h2>
+              <span class="hint" id="scannerState">Stopped</span>
+            </div>
+            <div id="scannerTop" class="scanner-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Alerts</h2>
+              <span class="hint">A/A+ queue</span>
+            </div>
+            <div id="scannerAlerts" class="scanner-list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Accounts</h2>
+              <span class="hint">Group stats</span>
+            </div>
+            <div id="accountsStatus" class="account-status-list"></div>
+          </section>
+
           <section class="panel">
             <div class="panel-head">
               <h2>Manual</h2>

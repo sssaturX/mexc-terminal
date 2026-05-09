@@ -11,6 +11,11 @@ const MAX_TICKS = 2000;
 const MAX_CANDLES = 500;
 const CANDLE_MS = 60_000;
 
+interface TradingEngineOptions {
+  enableKeyboardControls?: boolean;
+  onTradeAction?: (action: "BUY" | "SELL" | "CLOSE", reason: string) => void;
+}
+
 export class TradingEngine {
   private readonly ticks: Tick[] = [];
   private readonly candles: Candle[] = [];
@@ -25,7 +30,8 @@ export class TradingEngine {
     private readonly strategy: Strategy,
     private readonly positions: PositionManager,
     private readonly risk: RiskManager,
-    private readonly logger: Logger
+    private readonly logger: Logger,
+    private readonly options: TradingEngineOptions = {}
   ) {
     this.manualControls = new ManualControls(this.logger, () => {
       void this.stop("SHUTDOWN").finally(() => process.exit(0));
@@ -34,7 +40,9 @@ export class TradingEngine {
 
   async start(): Promise<void> {
     this.running = true;
-    this.manualControls.start();
+    if (this.options.enableKeyboardControls ?? true) {
+      this.manualControls.start();
+    }
     this.logger.info(
       `Bot started symbol=${this.config.symbol} strategy=${this.strategy.name} mode=${this.config.dryRun ? "DRY-RUN" : "LIVE"}`
     );
@@ -131,7 +139,8 @@ export class TradingEngine {
 
     const manualSignal = this.manualControls.consume(this.config.directionMode);
     if (manualSignal) {
-      await this.handleSignal(manualSignal, price, "ManualControls");
+      const source = manualSignal.reason.startsWith("Master ") ? "MirrorControls" : "ManualControls";
+      await this.handleSignal(manualSignal, price, source);
       this.renderStatus(price);
       return;
     }
@@ -233,6 +242,7 @@ export class TradingEngine {
         dryRun: this.config.dryRun
       })
     );
+    this.options.onTradeAction?.(signal.action, signal.reason);
   }
 
   private manualOpenConfig(): BotConfig {
@@ -306,6 +316,7 @@ export class TradingEngine {
       const pnl = exit.trade.pnl >= 0 ? `+${exit.trade.pnl.toFixed(4)}` : exit.trade.pnl.toFixed(4);
       this.logger.info(`Closing ${position.side} reason=${reason} price=${price} pnl=${pnl} USDT`);
       this.logger.info(formatCloseCard(exit.trade));
+      this.options.onTradeAction?.("CLOSE", reason);
     }
     return exit;
   }

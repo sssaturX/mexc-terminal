@@ -254,7 +254,7 @@ The web UI also has a `Spread Checker` tab:
 npm run web
 ```
 
-Open `http://127.0.0.1:8787`, switch to `Spread Checker`, choose `All market tickers` or `Custom symbols`, configure the minimum display spread %, alert thresholds and notification credentials, then start the checker. Web settings are saved in ignored `config/settings.json`.
+Open `http://127.0.0.1:8787`, switch to `Spread Checker`, choose `All USDT futures` or `Custom symbols`, configure the minimum display spread %, alert thresholds and notification credentials, then start the checker. The all-market mode filters MEXC and Gate to `_USDT` futures so inverse contracts like `BTC_USD` are not mixed into USDT comparisons. Web settings are saved in ignored `config/settings.json`.
 
 ### Notification Setup
 

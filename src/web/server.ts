@@ -416,12 +416,15 @@ function stopSpreadChecker(): void {
 async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void> {
   const updatedAt = new Date().toISOString();
   try {
+    if (config.marketScope === "custom") {
+      spreadRows = await fetchCustomSpreadRows(config, updatedAt);
+      broadcast("spread", currentSpreadStatus(config));
+      return;
+    }
+
     const [mexcPrices, gateLastPrices] = await Promise.all([fetchMexcTickerPrices(), fetchGateLastPrices()]);
     const { fairPrices, lastPrices: mexcLastPrices } = mexcPrices;
-    const symbols =
-      config.marketScope === "all"
-        ? Array.from(new Set([...fairPrices.keys(), ...mexcLastPrices.keys()])).sort()
-        : config.symbols;
+    const symbols = Array.from(new Set([...fairPrices.keys(), ...mexcLastPrices.keys()])).filter(isUsdtPerpetualSymbol).sort();
     const rows: SpreadRow[] = [];
     for (const symbol of symbols) {
       const fairPrice = fairPrices.get(symbol);
@@ -465,6 +468,47 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
     pushWebLog("WARN", `Spread Checker market fetch failed: ${error instanceof Error ? error.message : String(error)}`);
   }
   broadcast("spread", currentSpreadStatus(config));
+}
+
+async function fetchCustomSpreadRows(config: SpreadCheckerConfig, updatedAt: string): Promise<SpreadRow[]> {
+  const gateLastPrices = await fetchGateLastPrices();
+  const rows: SpreadRow[] = [];
+  for (const symbol of config.symbols) {
+    try {
+      const [fairPrice, mexcLast] = await Promise.all([fetchMexcFairPrice(symbol), fetchMexcLastPrice(symbol)]);
+      const gateLast = gateLastPrices.get(symbol);
+      const mexcSpreadPercent = fairPrice === 0 ? 0 : (Math.abs(mexcLast - fairPrice) / fairPrice) * 100;
+      const hasGate = gateLast !== undefined;
+      const crossSpreadPercent = hasGate && mexcLast !== 0 ? (Math.abs(gateLast - mexcLast) / mexcLast) * 100 : undefined;
+      const row: SpreadRow = {
+        symbol,
+        fairPrice,
+        mexcLast,
+        gateLast,
+        mexcSpreadPercent,
+        crossSpreadPercent,
+        mexcDirection: mexcLast >= fairPrice ? "MEXC_LAST_ABOVE_FAIR" : "MEXC_LAST_BELOW_FAIR",
+        crossDirection: hasGate ? (gateLast >= mexcLast ? "GATE_ABOVE_MEXC" : "GATE_BELOW_MEXC") : undefined,
+        mexcTriggered: mexcSpreadPercent >= config.mexcThresholdPercent,
+        crossTriggered: crossSpreadPercent !== undefined && crossSpreadPercent >= config.crossExchangeThresholdPercent,
+        updatedAt
+      };
+      rows.push(row);
+      await processSpreadThreshold(config, row, "MEXC_INTERNAL");
+      if (hasGate) {
+        await processSpreadThreshold(config, row, "CROSS_EXCHANGE");
+      }
+    } catch (error) {
+      rows.push({
+        symbol,
+        mexcTriggered: false,
+        crossTriggered: false,
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt
+      });
+    }
+  }
+  return rows;
 }
 
 async function processSpreadThreshold(
@@ -671,7 +715,7 @@ function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadChecker
     ["sms", "push", "call", "email_to_sms"]
   );
   const pushProvider = stringOption(record.pushProvider, saved?.pushProvider ?? DEFAULT_SPREAD_CONFIG.pushProvider, ["pushover", "ntfy"]);
-  const symbols = parseSymbolList(record.symbols ?? saved?.symbols ?? DEFAULT_SPREAD_CONFIG.symbols);
+  const symbols = parseSymbolList(record.symbols ?? saved?.symbols ?? DEFAULT_SPREAD_CONFIG.symbols).filter(isUsdtPerpetualSymbol);
   return {
     marketScope,
     symbols: (symbols.length > 0 ? symbols : DEFAULT_SPREAD_CONFIG.symbols).slice(0, 50),
@@ -964,6 +1008,28 @@ async function fetchMexcTickerPrices(): Promise<{ fairPrices: Map<string, number
     fairPrices: rowsToPriceMap(rows, "symbol", "fairPrice", "MEXC fair price"),
     lastPrices: rowsToPriceMap(rows, "symbol", "lastPrice", "MEXC last price")
   };
+}
+
+async function fetchMexcFairPrice(symbol: string): Promise<number> {
+  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/fair_price/${encodeURIComponent(symbol)}`);
+  const data = dataValue(payload);
+  if (Array.isArray(data)) {
+    throw new Error(`Unexpected MEXC fair price response for ${symbol}`);
+  }
+  return numberField(data, "fairPrice", `MEXC fair price ${symbol}`);
+}
+
+async function fetchMexcLastPrice(symbol: string): Promise<number> {
+  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/ticker?symbol=${encodeURIComponent(symbol)}`);
+  const data = dataValue(payload);
+  if (Array.isArray(data)) {
+    const row = data.find((item) => typeof item === "object" && item !== null && (item as Record<string, unknown>).symbol === symbol);
+    if (!row || typeof row !== "object") {
+      throw new Error(`MEXC ticker did not contain ${symbol}`);
+    }
+    return numberField(row as Record<string, unknown>, "lastPrice", `MEXC last price ${symbol}`);
+  }
+  return numberField(data, "lastPrice", `MEXC last price ${symbol}`);
 }
 
 async function fetchGateLastPrices(): Promise<Map<string, number>> {
@@ -1310,6 +1376,10 @@ function parseSymbolList(value: unknown): string[] {
         .filter((symbol) => /^[A-Z0-9]+_[A-Z0-9]+$/.test(symbol))
     )
   );
+}
+
+function isUsdtPerpetualSymbol(symbol: string): boolean {
+  return /^[A-Z0-9]+_USDT$/.test(symbol);
 }
 
 function buildSymbols(saved?: SavedWebConfig): string[] {

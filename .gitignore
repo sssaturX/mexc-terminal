@@ -5,3 +5,5 @@ logs/
 config/settings.json
 *.log
 coverage/
+__pycache__/
+*.pyc

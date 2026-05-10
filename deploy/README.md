@@ -16,16 +16,41 @@ Add an `AAAA` record too if the VPS has IPv6.
 
 These commands assume Ubuntu/Debian and an app directory at `/opt/mexc-terminal`.
 
+Install nginx and Node.js 20 or newer. The Node.js package from older Ubuntu
+repositories can be too old for this project.
+
 ```bash
 sudo apt update
-sudo apt install -y nginx nodejs npm
+sudo apt install -y ca-certificates curl gnupg nginx
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+node --version
 
 sudo useradd --system --create-home --shell /usr/sbin/nologin mexc
 sudo mkdir -p /opt/mexc-terminal
 sudo chown -R mexc:mexc /opt/mexc-terminal
 ```
 
-Copy the project to `/opt/mexc-terminal`, then install and build:
+Copy the project contents to `/opt/mexc-terminal`, including `package.json` and
+`package-lock.json`. From your local checkout, run:
+
+```bash
+rsync -az --delete \
+  --exclude node_modules \
+  --exclude dist \
+  --exclude .git \
+  ./ root@your-vps-ip:/opt/mexc-terminal/
+```
+
+If you are already on the server, copy or extract the project into
+`/opt/mexc-terminal` and then verify the package files exist:
+
+```bash
+sudo ls -la /opt/mexc-terminal/package.json /opt/mexc-terminal/package-lock.json
+sudo chown -R mexc:mexc /opt/mexc-terminal
+```
+
+Then install and build:
 
 ```bash
 cd /opt/mexc-terminal

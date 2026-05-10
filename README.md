@@ -172,3 +172,139 @@ Example:
 [INFO] Closing LONG reason=TAKE_PROFIT price=65015 pnl=+2.3100 USDT
 [ERROR] SDK error: rate limit
 ```
+
+## Spread Checker
+
+Python 3.11+ service for monitoring perpetual futures spreads:
+
+- MEXC internal spread: Fair Price vs Last Price
+- Cross-exchange spread: Gate.io Last Price vs MEXC Last Price
+- phone notifications without social networks: Twilio SMS, Pushover/ntfy push, Twilio call, or email-to-SMS
+- anti-spam with per `symbol + spread_type` cooldown and hysteresis
+- REST polling MVP with exchange client interfaces that can be replaced by WebSocket clients later
+
+Official public endpoints used:
+
+- MEXC fair price: `GET https://contract.mexc.com/api/v1/contract/fair_price/{symbol}`
+- MEXC ticker: `GET https://contract.mexc.com/api/v1/contract/ticker?symbol=BTC_USDT`
+- Gate.io futures ticker: `GET https://api.gateio.ws/api/v4/futures/usdt/tickers?contract=BTC_USDT`
+
+### Python Install
+
+```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Config
+
+Use `.env` or `config.yaml`. Values from `.env` override YAML, and CLI flags override both.
+
+Example `.env`:
+
+```bash
+SYMBOLS=BTC_USDT,ETH_USDT,SOL_USDT
+MEXC_THRESHOLD_PERCENT=0.30
+CROSS_EXCHANGE_THRESHOLD_PERCENT=0.50
+CHECK_INTERVAL_SEC=3
+ALERT_COOLDOWN_SEC=300
+NOTIFICATION_METHOD=push
+PUSH_PROVIDER=pushover
+DRY_RUN=true
+
+PUSHOVER_APP_TOKEN=your_pushover_app_token
+PUSHOVER_USER_KEY=your_pushover_user_key
+
+TWILIO_ACCOUNT_SID=your_twilio_sid
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
+TWILIO_FROM_NUMBER=+15551234567
+TWILIO_TO_NUMBER=+15557654321
+```
+
+Example `config.yaml` is in `config.example.yaml`:
+
+```yaml
+SYMBOLS:
+  - BTC_USDT
+  - ETH_USDT
+  - SOL_USDT
+MEXC_THRESHOLD_PERCENT: "0.30"
+CROSS_EXCHANGE_THRESHOLD_PERCENT: "0.50"
+CHECK_INTERVAL_SEC: 3
+ALERT_COOLDOWN_SEC: 300
+NOTIFICATION_METHOD: push
+PUSH_PROVIDER: pushover
+DRY_RUN: true
+```
+
+### Run
+
+```bash
+python main.py --config config.yaml
+python main.py --symbols BTC_USDT ETH_USDT --dry-run
+python main.py --config config.example.yaml --once
+```
+
+`--dry-run` logs notifications instead of sending them. Logs are written to stdout and `logs/spread_checker.log`.
+
+The web UI also has a `Spread Checker` tab:
+
+```bash
+npm run web
+```
+
+Open `http://127.0.0.1:8787`, switch to `Spread Checker`, configure symbols, thresholds and notification credentials, then start the checker. Web settings are saved in ignored `config/settings.json`.
+
+### Notification Setup
+
+SMS via Twilio:
+
+```bash
+NOTIFICATION_METHOD=sms
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_FROM_NUMBER=+15551234567
+TWILIO_TO_NUMBER=+15557654321
+```
+
+Push via Pushover:
+
+```bash
+NOTIFICATION_METHOD=push
+PUSH_PROVIDER=pushover
+PUSHOVER_APP_TOKEN=...
+PUSHOVER_USER_KEY=...
+```
+
+Push via ntfy.sh:
+
+```bash
+NOTIFICATION_METHOD=push
+PUSH_PROVIDER=ntfy
+NTFY_SERVER=https://ntfy.sh
+NTFY_TOPIC=your-private-topic
+NTFY_TOKEN=
+```
+
+Twilio voice call:
+
+```bash
+NOTIFICATION_METHOD=call
+TWILIO_ACCOUNT_SID=...
+TWILIO_AUTH_TOKEN=...
+TWILIO_FROM_NUMBER=+15551234567
+TWILIO_TO_NUMBER=+15557654321
+```
+
+Email-to-SMS gateway:
+
+```bash
+NOTIFICATION_METHOD=email_to_sms
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=...
+SMTP_PASSWORD=...
+EMAIL_FROM=alerts@example.com
+EMAIL_TO_SMS_ADDRESS=15557654321@carrier-gateway.example
+```

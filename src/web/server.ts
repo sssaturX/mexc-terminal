@@ -18,6 +18,7 @@ type SavedWebConfig = Omit<BotConfig, "strategyName" | "strategyParams"> & {
   accounts?: SavedWebAccount[];
   masterAccountId?: string;
   scanner?: SavedScannerConfig;
+  spreadChecker?: SavedSpreadCheckerConfig;
   symbolHistory?: string[];
 };
 
@@ -47,6 +48,87 @@ interface SavedScannerConfig {
   tickIntervalMs?: number;
 }
 
+interface SavedSpreadCheckerConfig {
+  symbols?: string[];
+  mexcThresholdPercent?: number;
+  crossExchangeThresholdPercent?: number;
+  checkIntervalSec?: number;
+  alertCooldownSec?: number;
+  notificationMethod?: "sms" | "push" | "call" | "email_to_sms";
+  pushProvider?: "pushover" | "ntfy";
+  dryRun?: boolean;
+  twilioAccountSid?: string;
+  twilioAuthToken?: string;
+  twilioFromNumber?: string;
+  twilioToNumber?: string;
+  pushoverAppToken?: string;
+  pushoverUserKey?: string;
+  ntfyServer?: string;
+  ntfyTopic?: string;
+  ntfyToken?: string;
+  emailToSmsAddress?: string;
+}
+
+interface SpreadCheckerConfig {
+  symbols: string[];
+  mexcThresholdPercent: number;
+  crossExchangeThresholdPercent: number;
+  checkIntervalSec: number;
+  alertCooldownSec: number;
+  notificationMethod: "sms" | "push" | "call" | "email_to_sms";
+  pushProvider: "pushover" | "ntfy";
+  dryRun: boolean;
+  twilioAccountSid: string;
+  twilioAuthToken: string;
+  twilioFromNumber: string;
+  twilioToNumber: string;
+  pushoverAppToken: string;
+  pushoverUserKey: string;
+  ntfyServer: string;
+  ntfyTopic: string;
+  ntfyToken: string;
+  emailToSmsAddress: string;
+}
+
+interface SpreadRow {
+  symbol: string;
+  fairPrice?: number;
+  mexcLast?: number;
+  gateLast?: number;
+  mexcSpreadPercent?: number;
+  crossSpreadPercent?: number;
+  mexcDirection?: "MEXC_LAST_ABOVE_FAIR" | "MEXC_LAST_BELOW_FAIR";
+  crossDirection?: "GATE_ABOVE_MEXC" | "GATE_BELOW_MEXC";
+  mexcTriggered: boolean;
+  crossTriggered: boolean;
+  error?: string;
+  updatedAt: string;
+}
+
+interface SpreadAlert {
+  id: string;
+  symbol: string;
+  type: "MEXC_INTERNAL" | "CROSS_EXCHANGE";
+  message: string;
+  timestamp: string;
+  delivered: boolean;
+  error?: string;
+}
+
+interface SpreadRuntimeStatus {
+  running: boolean;
+  rows: SpreadRow[];
+  alerts: SpreadAlert[];
+  lastUpdated?: string;
+  dryRun: boolean;
+  settings: SpreadCheckerConfig;
+}
+
+interface SpreadAlertState {
+  aboveThreshold: boolean;
+  lastAlertAt: number;
+}
+
 interface StrategySchema {
   name: string;
   description: string;
@@ -70,6 +152,28 @@ const POPULAR_SYMBOLS = [
   "SUI_USDT",
   "PEPE_USDT"
 ];
+const MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com";
+const GATE_API_BASE_URL = "https://api.gateio.ws/api/v4";
+const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
+  symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
+  mexcThresholdPercent: 0.3,
+  crossExchangeThresholdPercent: 0.5,
+  checkIntervalSec: 3,
+  alertCooldownSec: 300,
+  notificationMethod: "push",
+  pushProvider: "pushover",
+  dryRun: true,
+  twilioAccountSid: "",
+  twilioAuthToken: "",
+  twilioFromNumber: "",
+  twilioToNumber: "",
+  pushoverAppToken: "",
+  pushoverUserKey: "",
+  ntfyServer: "https://ntfy.sh",
+  ntfyTopic: "",
+  ntfyToken: "",
+  emailToSmsAddress: ""
+};
 
 const strategySchemas: StrategySchema[] = [
   schema("RandomCoinflipScalper", [{ name: "probability", label: "Trade probability per tick", type: "number", initial: 0.03 }]),
@@ -137,6 +241,11 @@ const strategySchemas: StrategySchema[] = [
 let runtimes: AccountRuntime[] = [];
 let scanner: ScannerEngine | undefined;
 let unsubscribeScannerLogs: (() => void) | undefined;
+let spreadCheckerTimer: NodeJS.Timeout | undefined;
+let spreadCheckerRunning = false;
+let spreadRows: SpreadRow[] = [];
+let spreadAlerts: SpreadAlert[] = [];
+const spreadAlertStates = new Map<string, SpreadAlertState>();
 const clients = new Set<ServerResponse>();
 const recentLogs: Array<{ level: string; message: string; timestamp: string }> = [];
 
@@ -151,6 +260,7 @@ server.listen(PORT, "127.0.0.1", () => {
 setInterval(() => {
   broadcast("status", currentStatus());
   broadcast("scanner", currentScannerStatus());
+  broadcast("spread", currentSpreadStatus());
 }, 1000).unref();
 
 async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -165,6 +275,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       strategies: strategySchemas,
       running: runtimes.length > 0,
       scanner: currentScannerStatus(),
+      spread: currentSpreadStatus(),
       status: currentStatus()
     });
   }
@@ -188,6 +299,26 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
   if (url.pathname === "/api/scanner/status") {
     return sendJson(res, 200, currentScannerStatus());
+  }
+  if (url.pathname === "/api/spread-checker/save" && req.method === "POST") {
+    const body = await readJson(req);
+    const config = buildSpreadCheckerConfig(body as Record<string, unknown>);
+    saveSpreadCheckerConfig(config);
+    broadcast("spread", currentSpreadStatus(config));
+    return sendJson(res, 200, { ok: true, spread: currentSpreadStatus(config) });
+  }
+  if (url.pathname === "/api/spread-checker/start" && req.method === "POST") {
+    const body = await readJson(req);
+    const config = buildSpreadCheckerConfig(body as Record<string, unknown>);
+    await startSpreadChecker(config);
+    return sendJson(res, 200, { ok: true, spread: currentSpreadStatus(config) });
+  }
+  if (url.pathname === "/api/spread-checker/stop" && req.method === "POST") {
+    stopSpreadChecker();
+    return sendJson(res, 200, { ok: true, spread: currentSpreadStatus() });
+  }
+  if (url.pathname === "/api/spread-checker/status") {
+    return sendJson(res, 200, currentSpreadStatus());
   }
   if (url.pathname === "/api/scanner/execute" && req.method === "POST") {
     const body = (await readJson(req)) as { alertId?: string };
@@ -249,6 +380,123 @@ async function stopScanner(): Promise<void> {
   unsubscribeScannerLogs?.();
   unsubscribeScannerLogs = undefined;
   broadcast("scanner", currentScannerStatus());
+}
+
+async function startSpreadChecker(config: SpreadCheckerConfig): Promise<void> {
+  stopSpreadChecker();
+  saveSpreadCheckerConfig(config);
+  spreadCheckerRunning = true;
+  spreadRows = [];
+  spreadAlerts = [];
+  spreadAlertStates.clear();
+  await runSpreadCheckerCycle(config);
+  spreadCheckerTimer = setInterval(() => {
+    void runSpreadCheckerCycle(config);
+  }, config.checkIntervalSec * 1000);
+  spreadCheckerTimer.unref();
+  broadcast("spread", currentSpreadStatus(config));
+}
+
+function stopSpreadChecker(): void {
+  if (spreadCheckerTimer) {
+    clearInterval(spreadCheckerTimer);
+    spreadCheckerTimer = undefined;
+  }
+  spreadCheckerRunning = false;
+  broadcast("spread", currentSpreadStatus());
+}
+
+async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void> {
+  const rows: SpreadRow[] = [];
+  for (const rawSymbol of config.symbols) {
+    const symbol = normalizeSymbol(rawSymbol);
+    const updatedAt = new Date().toISOString();
+    try {
+      const [fairPrice, mexcLast, gateLast] = await Promise.all([
+        fetchMexcFairPrice(symbol),
+        fetchMexcLastPrice(symbol),
+        fetchGateLastPrice(symbol)
+      ]);
+      const mexcSpreadPercent = fairPrice === 0 ? 0 : (Math.abs(mexcLast - fairPrice) / fairPrice) * 100;
+      const crossSpreadPercent = mexcLast === 0 ? 0 : (Math.abs(gateLast - mexcLast) / mexcLast) * 100;
+      const row: SpreadRow = {
+        symbol,
+        fairPrice,
+        mexcLast,
+        gateLast,
+        mexcSpreadPercent,
+        crossSpreadPercent,
+        mexcDirection: mexcLast >= fairPrice ? "MEXC_LAST_ABOVE_FAIR" : "MEXC_LAST_BELOW_FAIR",
+        crossDirection: gateLast >= mexcLast ? "GATE_ABOVE_MEXC" : "GATE_BELOW_MEXC",
+        mexcTriggered: mexcSpreadPercent >= config.mexcThresholdPercent,
+        crossTriggered: crossSpreadPercent >= config.crossExchangeThresholdPercent,
+        updatedAt
+      };
+      rows.push(row);
+      await processSpreadThreshold(config, row, "MEXC_INTERNAL");
+      await processSpreadThreshold(config, row, "CROSS_EXCHANGE");
+    } catch (error) {
+      rows.push({
+        symbol,
+        mexcTriggered: false,
+        crossTriggered: false,
+        error: error instanceof Error ? error.message : String(error),
+        updatedAt
+      });
+      pushWebLog("WARN", `Spread Checker ${symbol}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  spreadRows = rows;
+  broadcast("spread", currentSpreadStatus(config));
+}
+
+async function processSpreadThreshold(
+  config: SpreadCheckerConfig,
+  row: SpreadRow,
+  type: "MEXC_INTERNAL" | "CROSS_EXCHANGE"
+): Promise<void> {
+  const spreadPercent = type === "MEXC_INTERNAL" ? row.mexcSpreadPercent : row.crossSpreadPercent;
+  const threshold = type === "MEXC_INTERNAL" ? config.mexcThresholdPercent : config.crossExchangeThresholdPercent;
+  if (spreadPercent === undefined) {
+    return;
+  }
+
+  const stateKey = `${row.symbol}:${type}`;
+  const state = spreadAlertStates.get(stateKey) ?? { aboveThreshold: false, lastAlertAt: 0 };
+  if (spreadPercent < threshold) {
+    state.aboveThreshold = false;
+    spreadAlertStates.set(stateKey, state);
+    return;
+  }
+
+  const now = Date.now();
+  const cooldownElapsed = state.lastAlertAt === 0 || now - state.lastAlertAt >= config.alertCooldownSec * 1000;
+  if (state.aboveThreshold && !cooldownElapsed) {
+    spreadAlertStates.set(stateKey, state);
+    return;
+  }
+
+  state.aboveThreshold = true;
+  state.lastAlertAt = now;
+  spreadAlertStates.set(stateKey, state);
+
+  const message = type === "MEXC_INTERNAL" ? formatMexcSpreadAlert(config, row) : formatCrossSpreadAlert(config, row);
+  const alert: SpreadAlert = {
+    id: `${now}-${row.symbol}-${type}`,
+    symbol: row.symbol,
+    type,
+    message,
+    timestamp: new Date(now).toISOString(),
+    delivered: false
+  };
+  try {
+    await sendSpreadNotification(config, message);
+    alert.delivered = true;
+  } catch (error) {
+    alert.error = error instanceof Error ? error.message : String(error);
+  }
+  spreadAlerts = [alert, ...spreadAlerts].slice(0, 50);
+  pushWebLog(alert.error ? "ERROR" : "WARN", alert.error ? `Spread alert failed: ${alert.error}` : message.replace(/\n/g, " | "));
 }
 
 async function startBot(input: Record<string, unknown>): Promise<void> {
@@ -394,6 +642,41 @@ function buildScannerConfig(input: Record<string, unknown>): ScannerConfig {
   };
   saveScannerConfig(config);
   return config;
+}
+
+function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadCheckerConfig {
+  const saved = readSaved()?.spreadChecker;
+  const record = typeof input.spreadChecker === "object" && input.spreadChecker !== null ? (input.spreadChecker as Record<string, unknown>) : input;
+  const notificationMethod = stringOption(
+    record.notificationMethod,
+    saved?.notificationMethod ?? DEFAULT_SPREAD_CONFIG.notificationMethod,
+    ["sms", "push", "call", "email_to_sms"]
+  );
+  const pushProvider = stringOption(record.pushProvider, saved?.pushProvider ?? DEFAULT_SPREAD_CONFIG.pushProvider, ["pushover", "ntfy"]);
+  const symbols = parseSymbolList(record.symbols ?? saved?.symbols ?? DEFAULT_SPREAD_CONFIG.symbols);
+  return {
+    symbols: (symbols.length > 0 ? symbols : DEFAULT_SPREAD_CONFIG.symbols).slice(0, 50),
+    mexcThresholdPercent: positiveNumber(record.mexcThresholdPercent ?? saved?.mexcThresholdPercent, DEFAULT_SPREAD_CONFIG.mexcThresholdPercent),
+    crossExchangeThresholdPercent: positiveNumber(
+      record.crossExchangeThresholdPercent ?? saved?.crossExchangeThresholdPercent,
+      DEFAULT_SPREAD_CONFIG.crossExchangeThresholdPercent
+    ),
+    checkIntervalSec: Math.max(1, positiveNumber(record.checkIntervalSec ?? saved?.checkIntervalSec, DEFAULT_SPREAD_CONFIG.checkIntervalSec)),
+    alertCooldownSec: Math.max(1, positiveNumber(record.alertCooldownSec ?? saved?.alertCooldownSec, DEFAULT_SPREAD_CONFIG.alertCooldownSec)),
+    notificationMethod,
+    pushProvider,
+    dryRun: booleanValue(record.dryRun, saved?.dryRun ?? DEFAULT_SPREAD_CONFIG.dryRun),
+    twilioAccountSid: stringValue(record.twilioAccountSid, saved?.twilioAccountSid ?? process.env.TWILIO_ACCOUNT_SID ?? ""),
+    twilioAuthToken: stringValue(record.twilioAuthToken, saved?.twilioAuthToken ?? process.env.TWILIO_AUTH_TOKEN ?? ""),
+    twilioFromNumber: stringValue(record.twilioFromNumber, saved?.twilioFromNumber ?? process.env.TWILIO_FROM_NUMBER ?? ""),
+    twilioToNumber: stringValue(record.twilioToNumber, saved?.twilioToNumber ?? process.env.TWILIO_TO_NUMBER ?? ""),
+    pushoverAppToken: stringValue(record.pushoverAppToken, saved?.pushoverAppToken ?? process.env.PUSHOVER_APP_TOKEN ?? ""),
+    pushoverUserKey: stringValue(record.pushoverUserKey, saved?.pushoverUserKey ?? process.env.PUSHOVER_USER_KEY ?? ""),
+    ntfyServer: stringValue(record.ntfyServer, saved?.ntfyServer ?? process.env.NTFY_SERVER ?? DEFAULT_SPREAD_CONFIG.ntfyServer),
+    ntfyTopic: stringValue(record.ntfyTopic, saved?.ntfyTopic ?? process.env.NTFY_TOPIC ?? ""),
+    ntfyToken: stringValue(record.ntfyToken, saved?.ntfyToken ?? process.env.NTFY_TOKEN ?? ""),
+    emailToSmsAddress: stringValue(record.emailToSmsAddress, saved?.emailToSmsAddress ?? process.env.EMAIL_TO_SMS_ADDRESS ?? "")
+  };
 }
 
 function buildAccounts(input: Record<string, unknown>, fallbackToken: string): SavedWebAccount[] {
@@ -542,6 +825,17 @@ function currentScannerStatus(): unknown {
   };
 }
 
+function currentSpreadStatus(config = buildSpreadCheckerConfig({})): SpreadRuntimeStatus {
+  return {
+    running: spreadCheckerRunning,
+    rows: spreadRows,
+    alerts: spreadAlerts,
+    lastUpdated: spreadRows[0]?.updatedAt,
+    dryRun: config.dryRun,
+    settings: config
+  };
+}
+
 function readSaved(): SavedWebConfig | undefined {
   if (!fs.existsSync(SETTINGS_PATH)) {
     return undefined;
@@ -593,6 +887,16 @@ function saveScannerConfig(config: ScannerConfig): void {
   fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
+function saveSpreadCheckerConfig(config: SpreadCheckerConfig): void {
+  const previous = readSaved();
+  const next: SavedWebConfig = {
+    ...((previous ?? {}) as SavedWebConfig),
+    spreadChecker: config
+  };
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+}
+
 function handleEvents(res: ServerResponse): void {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -605,6 +909,7 @@ function handleEvents(res: ServerResponse): void {
   }
   sendEvent(res, "status", currentStatus());
   sendEvent(res, "scanner", currentScannerStatus());
+  sendEvent(res, "spread", currentSpreadStatus());
   res.on("close", () => clients.delete(res));
 }
 
@@ -617,6 +922,251 @@ function broadcast(event: string, data: unknown): void {
 function sendEvent(res: ServerResponse, event: string, data: unknown): void {
   res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+async function fetchMexcFairPrice(symbol: string): Promise<number> {
+  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/fair_price/${encodeURIComponent(symbol)}`);
+  const data = objectValue(payload, "data");
+  return numberField(data, "fairPrice", `MEXC fair price ${symbol}`);
+}
+
+async function fetchMexcLastPrice(symbol: string): Promise<number> {
+  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/ticker?symbol=${encodeURIComponent(symbol)}`);
+  const data = objectValue(payload, "data");
+  return numberField(data, "lastPrice", `MEXC last price ${symbol}`);
+}
+
+async function fetchGateLastPrice(symbol: string): Promise<number> {
+  const payload = await fetchJson(`${GATE_API_BASE_URL}/futures/usdt/tickers?contract=${encodeURIComponent(symbol)}`);
+  if (!Array.isArray(payload)) {
+    throw new Error(`Unexpected Gate.io ticker response for ${symbol}`);
+  }
+  const ticker = payload.find((item) => typeof item === "object" && item !== null && (item as Record<string, unknown>).contract === symbol);
+  if (!ticker || typeof ticker !== "object") {
+    throw new Error(`Gate.io ticker did not contain ${symbol}`);
+  }
+  return numberField(ticker as Record<string, unknown>, "last", `Gate.io last price ${symbol}`);
+}
+
+async function fetchJson(url: string, attempts = 3): Promise<unknown> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (response.status === 429 || response.status >= 500) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+      }
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) {
+        break;
+      }
+      await delay(Math.min(500 * 2 ** (attempt - 1), 4_000));
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+  throw new Error(lastError instanceof Error ? lastError.message : String(lastError));
+}
+
+async function sendSpreadNotification(config: SpreadCheckerConfig, message: string): Promise<void> {
+  if (config.dryRun) {
+    pushWebLog("INFO", `DRY-RUN Spread notification: ${message.replace(/\n/g, " | ")}`);
+    return;
+  }
+  if (config.notificationMethod === "sms") {
+    await sendTwilioMessage(config, message);
+    return;
+  }
+  if (config.notificationMethod === "call") {
+    await sendTwilioCall(config, message);
+    return;
+  }
+  if (config.notificationMethod === "push" && config.pushProvider === "ntfy") {
+    await sendNtfy(config, message);
+    return;
+  }
+  if (config.notificationMethod === "push") {
+    await sendPushover(config, message);
+    return;
+  }
+  throw new Error("Email-to-SMS delivery is saved for the Python Spread Checker; the web runtime does not include SMTP delivery.");
+}
+
+async function sendTwilioMessage(config: SpreadCheckerConfig, message: string): Promise<void> {
+  requireSpreadFields(config, ["twilioAccountSid", "twilioAuthToken", "twilioFromNumber", "twilioToNumber"]);
+  const body = new URLSearchParams({
+    Body: message,
+    From: config.twilioFromNumber,
+    To: config.twilioToNumber
+  });
+  await postForm(
+    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(config.twilioAccountSid)}/Messages.json`,
+    body,
+    twilioHeaders(config)
+  );
+}
+
+async function sendTwilioCall(config: SpreadCheckerConfig, message: string): Promise<void> {
+  requireSpreadFields(config, ["twilioAccountSid", "twilioAuthToken", "twilioFromNumber", "twilioToNumber"]);
+  const body = new URLSearchParams({
+    Twiml: `<Response><Say voice="alice">${escapeXml(message)}</Say></Response>`,
+    From: config.twilioFromNumber,
+    To: config.twilioToNumber
+  });
+  await postForm(
+    `https://api.twilio.com/2010-04-01/Accounts/${encodeURIComponent(config.twilioAccountSid)}/Calls.json`,
+    body,
+    twilioHeaders(config)
+  );
+}
+
+async function sendPushover(config: SpreadCheckerConfig, message: string): Promise<void> {
+  requireSpreadFields(config, ["pushoverAppToken", "pushoverUserKey"]);
+  await postForm(
+    "https://api.pushover.net/1/messages.json",
+    new URLSearchParams({
+      token: config.pushoverAppToken,
+      user: config.pushoverUserKey,
+      title: "Spread Checker",
+      message
+    })
+  );
+}
+
+async function sendNtfy(config: SpreadCheckerConfig, message: string): Promise<void> {
+  requireSpreadFields(config, ["ntfyServer", "ntfyTopic"]);
+  const headers: Record<string, string> = {
+    Title: "Spread Checker",
+    Priority: "urgent"
+  };
+  if (config.ntfyToken) {
+    headers.Authorization = `Bearer ${config.ntfyToken}`;
+  }
+  const response = await fetch(`${config.ntfyServer.replace(/\/$/, "")}/${encodeURIComponent(config.ntfyTopic)}`, {
+    method: "POST",
+    headers,
+    body: message
+  });
+  if (!response.ok) {
+    throw new Error(`ntfy failed: HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  }
+}
+
+async function postForm(url: string, body: URLSearchParams, headers: Record<string, string> = {}): Promise<void> {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      ...headers
+    },
+    body
+  });
+  if (!response.ok) {
+    throw new Error(`Notification request failed: HTTP ${response.status}: ${(await response.text()).slice(0, 200)}`);
+  }
+}
+
+function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
+  return [
+    `ALERT: ${row.symbol}`,
+    "Type: MEXC Fair/Last",
+    `Fair: ${formatPrice(row.fairPrice)}`,
+    `MEXC Last: ${formatPrice(row.mexcLast)}`,
+    `Spread: ${formatFixed(row.mexcSpreadPercent, 4)}%`,
+    `Threshold: ${formatFixed(config.mexcThresholdPercent, 2)}%`,
+    `Direction: ${row.mexcDirection}`,
+    `Time: ${formatUtc(row.updatedAt)} UTC`
+  ].join("\n");
+}
+
+function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
+  return [
+    `ALERT: ${row.symbol}`,
+    "Type: Gate vs MEXC",
+    `Gate Last: ${formatPrice(row.gateLast)}`,
+    `MEXC Last: ${formatPrice(row.mexcLast)}`,
+    `Spread: ${formatFixed(row.crossSpreadPercent, 4)}%`,
+    `Threshold: ${formatFixed(config.crossExchangeThresholdPercent, 2)}%`,
+    `Direction: ${row.crossDirection}`,
+    `Time: ${formatUtc(row.updatedAt)} UTC`
+  ].join("\n");
+}
+
+function pushWebLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
+  const entry = { level, message, timestamp: new Date().toISOString() };
+  recentLogs.push(entry);
+  if (recentLogs.length > 300) {
+    recentLogs.shift();
+  }
+  broadcast("log", entry);
+}
+
+function objectValue(payload: unknown, key: string): Record<string, unknown> {
+  if (typeof payload !== "object" || payload === null) {
+    throw new Error(`Unexpected response shape: ${String(payload)}`);
+  }
+  const value = (payload as Record<string, unknown>)[key];
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`Response missing object field ${key}`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function numberField(record: Record<string, unknown>, key: string, label: string): number {
+  const value = Number(record[key]);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Invalid ${label}: ${String(record[key])}`);
+  }
+  return value;
+}
+
+function requireSpreadFields(config: SpreadCheckerConfig, fields: Array<keyof SpreadCheckerConfig>): void {
+  const missing = fields.filter((field) => !String(config[field] ?? "").trim());
+  if (missing.length > 0) {
+    throw new Error(`Missing notification settings: ${missing.join(", ")}`);
+  }
+}
+
+function twilioHeaders(config: SpreadCheckerConfig): Record<string, string> {
+  return {
+    Authorization: `Basic ${Buffer.from(`${config.twilioAccountSid}:${config.twilioAuthToken}`).toString("base64")}`
+  };
+}
+
+function stringOption<T extends string>(value: unknown, fallback: T, options: readonly T[]): T {
+  return options.includes(value as T) ? (value as T) : fallback;
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  const selected = value === undefined || value === null ? fallback : value;
+  return String(selected).trim();
+}
+
+function formatPrice(value: number | undefined): string {
+  return value === undefined ? "-" : value.toFixed(2);
+}
+
+function formatFixed(value: number | undefined, digits: number): string {
+  return value === undefined ? "-" : value.toFixed(digits);
+}
+
+function formatUtc(value: string): string {
+  return new Date(value).toISOString().replace("T", " ").slice(0, 19);
+}
+
+function escapeXml(value: string): string {
+  return value.replace(/[<>&'"]/g, (char) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", "'": "&apos;", '"': "&quot;" })[char] ?? char);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function sendJson(res: ServerResponse, status: number, data: unknown): void {

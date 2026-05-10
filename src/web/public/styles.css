@@ -89,6 +89,38 @@ h2 {
   margin-bottom: 12px;
 }
 
+.tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.tab-button {
+  width: auto;
+  height: 38px;
+  padding: 0 14px;
+  border-color: var(--line);
+  border-bottom-color: transparent;
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+  background: transparent;
+}
+
+.tab-button.active {
+  color: var(--text);
+  background: var(--panel);
+  border-color: var(--line);
+}
+
+.tab-panel {
+  display: none;
+}
+
+.tab-panel.active {
+  display: grid;
+}
+
 .metric,
 .panel {
   background: var(--panel);
@@ -119,6 +151,15 @@ h2 {
   display: grid;
   grid-template-columns: minmax(0, 1.35fr) minmax(380px, 0.65fr);
   gap: 12px;
+}
+
+.spread-layout {
+  grid-template-columns: minmax(360px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+}
+
+.tab-panel:not(.active) {
+  display: none;
 }
 
 .panel {
@@ -296,6 +337,45 @@ textarea:focus {
   font-size: 12px;
 }
 
+.spread-table-wrap {
+  overflow-x: auto;
+}
+
+.spread-table {
+  width: 100%;
+  min-width: 840px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.spread-table th,
+.spread-table td {
+  padding: 9px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.spread-table th {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.table-empty {
+  color: var(--muted);
+  text-align: center;
+}
+
+.alert-message {
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  color: var(--text);
+  font: 12px/1.45 "Cascadia Mono", Consolas, monospace;
+}
+
 .grade {
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -431,6 +511,7 @@ button:disabled {
 
 @media (max-width: 1050px) {
   .layout,
+  .spread-layout,
   .grid.two {
     grid-template-columns: 1fr;
   }
@@ -497,6 +578,16 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
     margin-bottom: 10px;
+  }
+
+  .tabs {
+    gap: 6px;
+    overflow-x: auto;
+  }
+
+  .tab-button {
+    height: 42px;
+    flex: 0 0 auto;
   }
 
   .metric {

@@ -1,4 +1,5 @@
 const form = document.querySelector("#configForm");
+const spreadForm = document.querySelector("#spreadForm");
 const logsEl = document.querySelector("#logs");
 const strategySelect = form.elements.strategyName;
 const strategyParamsEl = document.querySelector("#strategyParams");
@@ -7,6 +8,10 @@ const accountsStatusEl = document.querySelector("#accountsStatus");
 const scannerTopEl = document.querySelector("#scannerTop");
 const scannerAlertsEl = document.querySelector("#scannerAlerts");
 const scannerStateEl = document.querySelector("#scannerState");
+const spreadRowsEl = document.querySelector("#spreadRows");
+const spreadAlertsEl = document.querySelector("#spreadAlerts");
+const spreadStateEl = document.querySelector("#spreadState");
+const spreadUpdatedEl = document.querySelector("#spreadUpdated");
 let strategies = [];
 let eventsBound = false;
 let eventsConnected = false;
@@ -45,6 +50,18 @@ const scannerDefaults = {
   strictZeroFee: false
 };
 
+const spreadDefaults = {
+  symbols: "BTC_USDT, ETH_USDT, SOL_USDT",
+  mexcThresholdPercent: 0.3,
+  crossExchangeThresholdPercent: 0.5,
+  checkIntervalSec: 3,
+  alertCooldownSec: 300,
+  notificationMethod: "push",
+  pushProvider: "pushover",
+  dryRun: true,
+  ntfyServer: "https://ntfy.sh"
+};
+
 boot();
 
 async function boot() {
@@ -53,6 +70,7 @@ async function boot() {
   fillStrategies();
   fillSymbols(data.symbols, data.saved?.symbol);
   fillSaved(data.saved);
+  fillSpreadSettings(data.spread?.settings || data.saved?.spreadChecker);
   renderParams();
   if (!eventsBound) {
     bindEvents();
@@ -61,6 +79,7 @@ async function boot() {
   connectEvents();
   updateStatus(data.status);
   updateScanner(data.scanner);
+  updateSpread(data.spread);
 }
 
 function fillStrategies() {
@@ -115,7 +134,34 @@ function fillSaved(saved = {}) {
   form.elements.scannerStrictZeroFee.checked = Boolean(scanner.strictZeroFee ?? scannerDefaults.strictZeroFee);
 }
 
+function fillSpreadSettings(settings = {}) {
+  if (!spreadForm) {
+    return;
+  }
+  spreadForm.elements.symbols.value = (settings.symbols || spreadDefaults.symbols).toString();
+  spreadForm.elements.mexcThresholdPercent.value = settings.mexcThresholdPercent ?? spreadDefaults.mexcThresholdPercent;
+  spreadForm.elements.crossExchangeThresholdPercent.value = settings.crossExchangeThresholdPercent ?? spreadDefaults.crossExchangeThresholdPercent;
+  spreadForm.elements.checkIntervalSec.value = settings.checkIntervalSec ?? spreadDefaults.checkIntervalSec;
+  spreadForm.elements.alertCooldownSec.value = settings.alertCooldownSec ?? spreadDefaults.alertCooldownSec;
+  spreadForm.elements.notificationMethod.value = settings.notificationMethod || spreadDefaults.notificationMethod;
+  spreadForm.elements.pushProvider.value = settings.pushProvider || spreadDefaults.pushProvider;
+  spreadForm.elements.dryRun.checked = settings.dryRun ?? spreadDefaults.dryRun;
+  spreadForm.elements.twilioAccountSid.value = settings.twilioAccountSid || "";
+  spreadForm.elements.twilioAuthToken.value = settings.twilioAuthToken || "";
+  spreadForm.elements.twilioFromNumber.value = settings.twilioFromNumber || "";
+  spreadForm.elements.twilioToNumber.value = settings.twilioToNumber || "";
+  spreadForm.elements.pushoverAppToken.value = settings.pushoverAppToken || "";
+  spreadForm.elements.pushoverUserKey.value = settings.pushoverUserKey || "";
+  spreadForm.elements.ntfyServer.value = settings.ntfyServer || spreadDefaults.ntfyServer;
+  spreadForm.elements.ntfyTopic.value = settings.ntfyTopic || "";
+  spreadForm.elements.ntfyToken.value = settings.ntfyToken || "";
+  spreadForm.elements.emailToSmsAddress.value = settings.emailToSmsAddress || "";
+}
+
 function bindEvents() {
+  document.querySelectorAll("[data-tab]").forEach((button) => {
+    button.addEventListener("click", () => activateTab(button.dataset.tab));
+  });
   strategySelect.addEventListener("change", renderParams);
   document.querySelector("#addAccount").addEventListener("click", () => {
     const accounts = readAccounts();
@@ -163,6 +209,30 @@ function bindEvents() {
     const data = await api("/api/scanner/stop", "POST", {});
     updateScanner(data.scanner);
   });
+  document.querySelector("#saveSpreadBtn").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/spread-checker/save", "POST", collectSpreadConfig());
+      updateSpread(data.spread);
+      addLog({ level: "INFO", message: "Spread Checker settings saved", timestamp: new Date().toISOString() });
+    } catch (error) {
+      addLog({ level: "ERROR", message: error.message, timestamp: new Date().toISOString() });
+    }
+  });
+  document.querySelector("#startSpreadBtn").addEventListener("click", async () => {
+    setSpreadBusy(true);
+    try {
+      const data = await api("/api/spread-checker/start", "POST", collectSpreadConfig());
+      updateSpread(data.spread);
+    } catch (error) {
+      addLog({ level: "ERROR", message: error.message, timestamp: new Date().toISOString() });
+    } finally {
+      setSpreadBusy(false);
+    }
+  });
+  document.querySelector("#stopSpreadBtn").addEventListener("click", async () => {
+    const data = await api("/api/spread-checker/stop", "POST", {});
+    updateSpread(data.spread);
+  });
   document.querySelector("#reloadSaved").addEventListener("click", boot);
   document.querySelector("#clearLogs").addEventListener("click", () => {
     logsEl.innerHTML = "";
@@ -171,6 +241,15 @@ function bindEvents() {
     button.addEventListener("click", async () => {
       await api("/api/manual", "POST", { action: button.dataset.action });
     });
+  });
+}
+
+function activateTab(tabId) {
+  document.querySelectorAll(".tab-button").forEach((button) => {
+    button.classList.toggle("active", button.dataset.tab === tabId);
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === tabId);
   });
 }
 
@@ -375,6 +454,29 @@ function collectScannerConfig() {
   };
 }
 
+function collectSpreadConfig() {
+  return {
+    symbols: spreadForm.elements.symbols.value,
+    mexcThresholdPercent: Number(spreadForm.elements.mexcThresholdPercent.value),
+    crossExchangeThresholdPercent: Number(spreadForm.elements.crossExchangeThresholdPercent.value),
+    checkIntervalSec: Number(spreadForm.elements.checkIntervalSec.value),
+    alertCooldownSec: Number(spreadForm.elements.alertCooldownSec.value),
+    notificationMethod: spreadForm.elements.notificationMethod.value,
+    pushProvider: spreadForm.elements.pushProvider.value,
+    dryRun: spreadForm.elements.dryRun.checked,
+    twilioAccountSid: spreadForm.elements.twilioAccountSid.value,
+    twilioAuthToken: spreadForm.elements.twilioAuthToken.value,
+    twilioFromNumber: spreadForm.elements.twilioFromNumber.value,
+    twilioToNumber: spreadForm.elements.twilioToNumber.value,
+    pushoverAppToken: spreadForm.elements.pushoverAppToken.value,
+    pushoverUserKey: spreadForm.elements.pushoverUserKey.value,
+    ntfyServer: spreadForm.elements.ntfyServer.value,
+    ntfyTopic: spreadForm.elements.ntfyTopic.value,
+    ntfyToken: spreadForm.elements.ntfyToken.value,
+    emailToSmsAddress: spreadForm.elements.emailToSmsAddress.value
+  };
+}
+
 function targetKey(prefix, mode) {
   if (mode === "profitUsdt") return `${prefix}Usdt`;
   if (mode === "roePercent") return `${prefix}RoePercent`;
@@ -390,6 +492,7 @@ function connectEvents() {
   events.addEventListener("log", (event) => addLog(JSON.parse(event.data)));
   events.addEventListener("status", (event) => updateStatus(JSON.parse(event.data)));
   events.addEventListener("scanner", (event) => updateScanner(JSON.parse(event.data)));
+  events.addEventListener("spread", (event) => updateSpread(JSON.parse(event.data)));
 }
 
 function updateStatus(status) {
@@ -465,6 +568,74 @@ function updateScanner(scanner) {
     : "Stopped";
   renderScannerTop(scanner.topSymbols || []);
   renderScannerAlerts(scanner.alerts || []);
+}
+
+function updateSpread(spread) {
+  if (!spread || !spreadRowsEl || !spreadAlertsEl) {
+    return;
+  }
+  spreadStateEl.textContent = spread.running ? (spread.dryRun ? "Running dry-run" : "Running live alerts") : "Stopped";
+  spreadUpdatedEl.textContent = spread.lastUpdated ? new Date(spread.lastUpdated).toLocaleTimeString() : "No data";
+  renderSpreadRows(spread.rows || [], spread.settings || {});
+  renderSpreadAlerts(spread.alerts || []);
+}
+
+function renderSpreadRows(rows, settings) {
+  spreadRowsEl.innerHTML = "";
+  if (rows.length === 0) {
+    const row = document.createElement("tr");
+    row.innerHTML = `<td colspan="7" class="table-empty">No spread data yet</td>`;
+    spreadRowsEl.appendChild(row);
+    return;
+  }
+  for (const item of rows) {
+    const row = document.createElement("tr");
+    if (item.error) {
+      row.innerHTML = `
+        <td>${escapeHtml(item.symbol)}</td>
+        <td colspan="6" class="negative">${escapeHtml(item.error)}</td>
+      `;
+      spreadRowsEl.appendChild(row);
+      continue;
+    }
+    const mexcClass = item.mexcTriggered ? "negative" : "positive";
+    const crossClass = item.crossTriggered ? "negative" : "positive";
+    row.innerHTML = `
+      <td><strong>${escapeHtml(item.symbol)}</strong></td>
+      <td>${formatNumber(item.fairPrice)}</td>
+      <td>${formatNumber(item.mexcLast)}</td>
+      <td>${formatNumber(item.gateLast)}</td>
+      <td class="${mexcClass}">${formatPlainPercent(item.mexcSpreadPercent)} / ${formatPlainPercent(settings.mexcThresholdPercent)}</td>
+      <td class="${crossClass}">${formatPlainPercent(item.crossSpreadPercent)} / ${formatPlainPercent(settings.crossExchangeThresholdPercent)}</td>
+      <td>${escapeHtml([item.mexcDirection, item.crossDirection].filter(Boolean).join(" | "))}</td>
+    `;
+    spreadRowsEl.appendChild(row);
+  }
+}
+
+function renderSpreadAlerts(alerts) {
+  spreadAlertsEl.innerHTML = "";
+  if (alerts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "No spread alerts yet";
+    spreadAlertsEl.appendChild(empty);
+    return;
+  }
+  for (const alert of alerts.slice(0, 12)) {
+    const item = document.createElement("div");
+    item.className = "scanner-item";
+    item.innerHTML = `
+      <div class="scanner-item-head">
+        <strong>${escapeHtml(alert.symbol)} ${escapeHtml(alert.type)}</strong>
+        <span class="grade">${alert.delivered ? "SENT" : "FAILED"}</span>
+      </div>
+      <div class="scanner-item-reason">${escapeHtml(new Date(alert.timestamp).toLocaleString())}</div>
+      <pre class="alert-message">${escapeHtml(alert.message)}</pre>
+      ${alert.error ? `<div class="scanner-item-reason negative">${escapeHtml(alert.error)}</div>` : ""}
+    `;
+    spreadAlertsEl.appendChild(item);
+  }
 }
 
 function renderScannerTop(items) {
@@ -584,6 +755,10 @@ function setScannerBusy(value) {
   document.querySelector("#startScannerBtn").disabled = value;
 }
 
+function setSpreadBusy(value) {
+  document.querySelector("#startSpreadBtn").disabled = value;
+}
+
 function pricePercentToUsdt(pricePercent, margin, leverage) {
   return Number(((margin * leverage * pricePercent) / 100).toFixed(4));
 }
@@ -591,6 +766,11 @@ function pricePercentToUsdt(pricePercent, margin, leverage) {
 function formatPercent(value) {
   const numberValue = Number(value || 0);
   return `${numberValue >= 0 ? "+" : ""}${numberValue.toFixed(2)}%`;
+}
+
+function formatPlainPercent(value) {
+  const numberValue = Number(value || 0);
+  return `${numberValue.toFixed(4)}%`;
 }
 
 function formatNumber(value) {

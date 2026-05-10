@@ -35,7 +35,12 @@
         </article>
       </section>
 
-      <section class="layout">
+      <nav class="tabs" aria-label="Workspace tabs">
+        <button type="button" class="tab-button active" data-tab="tradingTab">Trading</button>
+        <button type="button" class="tab-button" data-tab="spreadTab">Spread Checker</button>
+      </nav>
+
+      <section class="layout tab-panel active" id="tradingTab">
         <form id="configForm" class="panel config-panel">
           <div class="panel-head">
             <h2>Setup</h2>
@@ -265,6 +270,142 @@
               <button type="button" class="ghost" id="clearLogs">Clear</button>
             </div>
             <div id="logs" class="logs"></div>
+          </section>
+        </aside>
+      </section>
+
+      <section class="spread-layout tab-panel" id="spreadTab">
+        <form id="spreadForm" class="panel">
+          <div class="panel-head">
+            <h2>Spread Checker</h2>
+            <span class="hint" id="spreadState">Stopped</span>
+          </div>
+
+          <div class="grid two">
+            <label>
+              <span>Symbols</span>
+              <textarea name="symbols" rows="3" placeholder="BTC_USDT, ETH_USDT, SOL_USDT"></textarea>
+            </label>
+            <label>
+              <span>Notification method</span>
+              <select name="notificationMethod">
+                <option value="sms">SMS via Twilio</option>
+                <option value="push">Push</option>
+                <option value="call">Phone call via Twilio</option>
+                <option value="email_to_sms">Email-to-SMS</option>
+              </select>
+            </label>
+            <label>
+              <span>MEXC Fair/Last threshold %</span>
+              <input name="mexcThresholdPercent" type="number" min="0" step="0.01" />
+            </label>
+            <label>
+              <span>Gate vs MEXC threshold %</span>
+              <input name="crossExchangeThresholdPercent" type="number" min="0" step="0.01" />
+            </label>
+            <label>
+              <span>Check interval sec</span>
+              <input name="checkIntervalSec" type="number" min="1" step="1" />
+            </label>
+            <label>
+              <span>Alert cooldown sec</span>
+              <input name="alertCooldownSec" type="number" min="1" step="1" />
+            </label>
+            <label>
+              <span>Push provider</span>
+              <select name="pushProvider">
+                <option value="pushover">Pushover</option>
+                <option value="ntfy">ntfy.sh</option>
+              </select>
+            </label>
+            <label class="check"><input name="dryRun" type="checkbox" /> Dry-run notifications</label>
+          </div>
+
+          <div class="section-title">Twilio SMS / Call</div>
+          <div class="grid two">
+            <label>
+              <span>Account SID</span>
+              <input name="twilioAccountSid" autocomplete="off" />
+            </label>
+            <label>
+              <span>Auth token</span>
+              <input name="twilioAuthToken" type="password" autocomplete="off" />
+            </label>
+            <label>
+              <span>From number</span>
+              <input name="twilioFromNumber" placeholder="+15551234567" />
+            </label>
+            <label>
+              <span>To number</span>
+              <input name="twilioToNumber" placeholder="+15557654321" />
+            </label>
+          </div>
+
+          <div class="section-title">Push</div>
+          <div class="grid two">
+            <label>
+              <span>Pushover app token</span>
+              <input name="pushoverAppToken" type="password" autocomplete="off" />
+            </label>
+            <label>
+              <span>Pushover user key</span>
+              <input name="pushoverUserKey" type="password" autocomplete="off" />
+            </label>
+            <label>
+              <span>ntfy server</span>
+              <input name="ntfyServer" placeholder="https://ntfy.sh" />
+            </label>
+            <label>
+              <span>ntfy topic</span>
+              <input name="ntfyTopic" autocomplete="off" />
+            </label>
+            <label>
+              <span>ntfy token</span>
+              <input name="ntfyToken" type="password" autocomplete="off" />
+            </label>
+            <label>
+              <span>Email-to-SMS address</span>
+              <input name="emailToSmsAddress" placeholder="15557654321@carrier-gateway.example" />
+            </label>
+          </div>
+
+          <div class="actions">
+            <button type="button" class="primary" id="startSpreadBtn">Start checker</button>
+            <button type="button" class="ghost" id="saveSpreadBtn">Save</button>
+            <button type="button" class="danger" id="stopSpreadBtn">Stop</button>
+          </div>
+        </form>
+
+        <aside class="side">
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Live spreads</h2>
+              <span class="hint" id="spreadUpdated">No data</span>
+            </div>
+            <div class="spread-table-wrap">
+              <table class="spread-table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Fair</th>
+                    <th>MEXC Last</th>
+                    <th>Gate Last</th>
+                    <th>MEXC %</th>
+                    <th>Gate/MEXC %</th>
+                    <th>Direction</th>
+                  </tr>
+                </thead>
+                <tbody id="spreadRows"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>Spread alerts</h2>
+              <span class="hint">Latest 50</span>
+            </div>
+            <div id="spreadAlerts" class="scanner-list"></div>
           </section>
         </aside>
       </section>

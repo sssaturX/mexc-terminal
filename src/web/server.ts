@@ -49,7 +49,9 @@ interface SavedScannerConfig {
 }
 
 interface SavedSpreadCheckerConfig {
+  marketScope?: "all" | "custom";
   symbols?: string[];
+  displayMinSpreadPercent?: number;
   mexcThresholdPercent?: number;
   crossExchangeThresholdPercent?: number;
   checkIntervalSec?: number;
@@ -70,7 +72,9 @@ interface SavedSpreadCheckerConfig {
 }
 
 interface SpreadCheckerConfig {
+  marketScope: "all" | "custom";
   symbols: string[];
+  displayMinSpreadPercent: number;
   mexcThresholdPercent: number;
   crossExchangeThresholdPercent: number;
   checkIntervalSec: number;
@@ -118,6 +122,7 @@ interface SpreadAlert {
 interface SpreadRuntimeStatus {
   running: boolean;
   rows: SpreadRow[];
+  totalRows: number;
   alerts: SpreadAlert[];
   lastUpdated?: string;
   dryRun: boolean;
@@ -155,7 +160,9 @@ const POPULAR_SYMBOLS = [
 const MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com";
 const GATE_API_BASE_URL = "https://api.gateio.ws/api/v4";
 const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
+  marketScope: "all",
   symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
+  displayMinSpreadPercent: 0.1,
   mexcThresholdPercent: 0.3,
   crossExchangeThresholdPercent: 0.5,
   checkIntervalSec: 3,
@@ -407,18 +414,33 @@ function stopSpreadChecker(): void {
 }
 
 async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void> {
-  const rows: SpreadRow[] = [];
-  for (const rawSymbol of config.symbols) {
-    const symbol = normalizeSymbol(rawSymbol);
-    const updatedAt = new Date().toISOString();
-    try {
-      const [fairPrice, mexcLast, gateLast] = await Promise.all([
-        fetchMexcFairPrice(symbol),
-        fetchMexcLastPrice(symbol),
-        fetchGateLastPrice(symbol)
-      ]);
+  const updatedAt = new Date().toISOString();
+  try {
+    const [mexcPrices, gateLastPrices] = await Promise.all([fetchMexcTickerPrices(), fetchGateLastPrices()]);
+    const { fairPrices, lastPrices: mexcLastPrices } = mexcPrices;
+    const symbols =
+      config.marketScope === "all"
+        ? Array.from(new Set([...fairPrices.keys(), ...mexcLastPrices.keys()])).sort()
+        : config.symbols;
+    const rows: SpreadRow[] = [];
+    for (const symbol of symbols) {
+      const fairPrice = fairPrices.get(symbol);
+      const mexcLast = mexcLastPrices.get(symbol);
+      const gateLast = gateLastPrices.get(symbol);
+      if (fairPrice === undefined || mexcLast === undefined) {
+        rows.push({
+          symbol,
+          mexcTriggered: false,
+          crossTriggered: false,
+          error: "MEXC fair price or last price is missing",
+          updatedAt
+        });
+        continue;
+      }
+
       const mexcSpreadPercent = fairPrice === 0 ? 0 : (Math.abs(mexcLast - fairPrice) / fairPrice) * 100;
-      const crossSpreadPercent = mexcLast === 0 ? 0 : (Math.abs(gateLast - mexcLast) / mexcLast) * 100;
+      const hasGate = gateLast !== undefined;
+      const crossSpreadPercent = hasGate && mexcLast !== 0 ? (Math.abs(gateLast - mexcLast) / mexcLast) * 100 : undefined;
       const row: SpreadRow = {
         symbol,
         fairPrice,
@@ -427,26 +449,21 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
         mexcSpreadPercent,
         crossSpreadPercent,
         mexcDirection: mexcLast >= fairPrice ? "MEXC_LAST_ABOVE_FAIR" : "MEXC_LAST_BELOW_FAIR",
-        crossDirection: gateLast >= mexcLast ? "GATE_ABOVE_MEXC" : "GATE_BELOW_MEXC",
+        crossDirection: hasGate ? (gateLast >= mexcLast ? "GATE_ABOVE_MEXC" : "GATE_BELOW_MEXC") : undefined,
         mexcTriggered: mexcSpreadPercent >= config.mexcThresholdPercent,
-        crossTriggered: crossSpreadPercent >= config.crossExchangeThresholdPercent,
+        crossTriggered: crossSpreadPercent !== undefined && crossSpreadPercent >= config.crossExchangeThresholdPercent,
         updatedAt
       };
       rows.push(row);
       await processSpreadThreshold(config, row, "MEXC_INTERNAL");
-      await processSpreadThreshold(config, row, "CROSS_EXCHANGE");
-    } catch (error) {
-      rows.push({
-        symbol,
-        mexcTriggered: false,
-        crossTriggered: false,
-        error: error instanceof Error ? error.message : String(error),
-        updatedAt
-      });
-      pushWebLog("WARN", `Spread Checker ${symbol}: ${error instanceof Error ? error.message : String(error)}`);
+      if (hasGate) {
+        await processSpreadThreshold(config, row, "CROSS_EXCHANGE");
+      }
     }
+    spreadRows = rows;
+  } catch (error) {
+    pushWebLog("WARN", `Spread Checker market fetch failed: ${error instanceof Error ? error.message : String(error)}`);
   }
-  spreadRows = rows;
   broadcast("spread", currentSpreadStatus(config));
 }
 
@@ -647,6 +664,7 @@ function buildScannerConfig(input: Record<string, unknown>): ScannerConfig {
 function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadCheckerConfig {
   const saved = readSaved()?.spreadChecker;
   const record = typeof input.spreadChecker === "object" && input.spreadChecker !== null ? (input.spreadChecker as Record<string, unknown>) : input;
+  const marketScope = stringOption(record.marketScope, saved?.marketScope ?? DEFAULT_SPREAD_CONFIG.marketScope, ["all", "custom"]);
   const notificationMethod = stringOption(
     record.notificationMethod,
     saved?.notificationMethod ?? DEFAULT_SPREAD_CONFIG.notificationMethod,
@@ -655,7 +673,12 @@ function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadChecker
   const pushProvider = stringOption(record.pushProvider, saved?.pushProvider ?? DEFAULT_SPREAD_CONFIG.pushProvider, ["pushover", "ntfy"]);
   const symbols = parseSymbolList(record.symbols ?? saved?.symbols ?? DEFAULT_SPREAD_CONFIG.symbols);
   return {
+    marketScope,
     symbols: (symbols.length > 0 ? symbols : DEFAULT_SPREAD_CONFIG.symbols).slice(0, 50),
+    displayMinSpreadPercent: Math.max(
+      0,
+      positiveNumber(record.displayMinSpreadPercent ?? saved?.displayMinSpreadPercent, DEFAULT_SPREAD_CONFIG.displayMinSpreadPercent)
+    ),
     mexcThresholdPercent: positiveNumber(record.mexcThresholdPercent ?? saved?.mexcThresholdPercent, DEFAULT_SPREAD_CONFIG.mexcThresholdPercent),
     crossExchangeThresholdPercent: positiveNumber(
       record.crossExchangeThresholdPercent ?? saved?.crossExchangeThresholdPercent,
@@ -826,9 +849,18 @@ function currentScannerStatus(): unknown {
 }
 
 function currentSpreadStatus(config = buildSpreadCheckerConfig({})): SpreadRuntimeStatus {
+  const visibleRows = spreadRows
+    .filter((row) => {
+      if (row.error) {
+        return config.marketScope === "custom";
+      }
+      return Math.max(row.mexcSpreadPercent ?? 0, row.crossSpreadPercent ?? 0) >= config.displayMinSpreadPercent;
+    })
+    .sort((left, right) => Math.max(right.mexcSpreadPercent ?? 0, right.crossSpreadPercent ?? 0) - Math.max(left.mexcSpreadPercent ?? 0, left.crossSpreadPercent ?? 0));
   return {
     running: spreadCheckerRunning,
-    rows: spreadRows,
+    rows: visibleRows,
+    totalRows: spreadRows.length,
     alerts: spreadAlerts,
     lastUpdated: spreadRows[0]?.updatedAt,
     dryRun: config.dryRun,
@@ -924,28 +956,22 @@ function sendEvent(res: ServerResponse, event: string, data: unknown): void {
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-async function fetchMexcFairPrice(symbol: string): Promise<number> {
-  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/fair_price/${encodeURIComponent(symbol)}`);
-  const data = objectValue(payload, "data");
-  return numberField(data, "fairPrice", `MEXC fair price ${symbol}`);
+async function fetchMexcTickerPrices(): Promise<{ fairPrices: Map<string, number>; lastPrices: Map<string, number> }> {
+  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/ticker`);
+  const data = dataValue(payload);
+  const rows = Array.isArray(data) ? data : Object.values(data as Record<string, unknown>);
+  return {
+    fairPrices: rowsToPriceMap(rows, "symbol", "fairPrice", "MEXC fair price"),
+    lastPrices: rowsToPriceMap(rows, "symbol", "lastPrice", "MEXC last price")
+  };
 }
 
-async function fetchMexcLastPrice(symbol: string): Promise<number> {
-  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/ticker?symbol=${encodeURIComponent(symbol)}`);
-  const data = objectValue(payload, "data");
-  return numberField(data, "lastPrice", `MEXC last price ${symbol}`);
-}
-
-async function fetchGateLastPrice(symbol: string): Promise<number> {
-  const payload = await fetchJson(`${GATE_API_BASE_URL}/futures/usdt/tickers?contract=${encodeURIComponent(symbol)}`);
+async function fetchGateLastPrices(): Promise<Map<string, number>> {
+  const payload = await fetchJson(`${GATE_API_BASE_URL}/futures/usdt/tickers`);
   if (!Array.isArray(payload)) {
-    throw new Error(`Unexpected Gate.io ticker response for ${symbol}`);
+    throw new Error("Unexpected Gate.io ticker response");
   }
-  const ticker = payload.find((item) => typeof item === "object" && item !== null && (item as Record<string, unknown>).contract === symbol);
-  if (!ticker || typeof ticker !== "object") {
-    throw new Error(`Gate.io ticker did not contain ${symbol}`);
-  }
-  return numberField(ticker as Record<string, unknown>, "last", `Gate.io last price ${symbol}`);
+  return rowsToPriceMap(payload, "contract", "last", "Gate.io last price");
 }
 
 async function fetchJson(url: string, attempts = 3): Promise<unknown> {
@@ -1108,15 +1134,15 @@ function pushWebLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
   broadcast("log", entry);
 }
 
-function objectValue(payload: unknown, key: string): Record<string, unknown> {
+function dataValue(payload: unknown): unknown[] | Record<string, unknown> {
   if (typeof payload !== "object" || payload === null) {
     throw new Error(`Unexpected response shape: ${String(payload)}`);
   }
-  const value = (payload as Record<string, unknown>)[key];
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`Response missing object field ${key}`);
+  const value = (payload as Record<string, unknown>).data;
+  if ((typeof value !== "object" || value === null) && !Array.isArray(value)) {
+    throw new Error("Response missing data field");
   }
-  return value as Record<string, unknown>;
+  return value as unknown[] | Record<string, unknown>;
 }
 
 function numberField(record: Record<string, unknown>, key: string, label: string): number {
@@ -1125,6 +1151,29 @@ function numberField(record: Record<string, unknown>, key: string, label: string
     throw new Error(`Invalid ${label}: ${String(record[key])}`);
   }
   return value;
+}
+
+function rowsToPriceMap(rows: unknown[], symbolKey: string, priceKey: string, label: string): Map<string, number> {
+  const prices = new Map<string, number>();
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) {
+      continue;
+    }
+    const record = row as Record<string, unknown>;
+    const symbol = normalizeSymbol(String(record[symbolKey] ?? ""));
+    if (!/^[A-Z0-9]+_[A-Z0-9]+$/.test(symbol)) {
+      continue;
+    }
+    try {
+      prices.set(symbol, numberField(record, priceKey, `${label} ${symbol}`));
+    } catch {
+      continue;
+    }
+  }
+  if (prices.size === 0) {
+    throw new Error(`${label} response did not contain prices`);
+  }
+  return prices;
 }
 
 function requireSpreadFields(config: SpreadCheckerConfig, fields: Array<keyof SpreadCheckerConfig>): void {

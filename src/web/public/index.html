@@ -283,7 +283,18 @@
 
           <div class="grid two">
             <label>
-              <span>Symbols</span>
+              <span>Market scope</span>
+              <select name="marketScope">
+                <option value="all">All market tickers</option>
+                <option value="custom">Custom symbols</option>
+              </select>
+            </label>
+            <label>
+              <span>Show spreads from %</span>
+              <input name="displayMinSpreadPercent" type="number" min="0" step="0.01" />
+            </label>
+            <label>
+              <span>Symbols for custom mode</span>
               <textarea name="symbols" rows="3" placeholder="BTC_USDT, ETH_USDT, SOL_USDT"></textarea>
             </label>
             <label>

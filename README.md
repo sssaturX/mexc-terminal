@@ -254,7 +254,7 @@ The web UI also has a `Spread Checker` tab:
 npm run web
 ```
 
-Open `http://127.0.0.1:8787`, switch to `Spread Checker`, configure symbols, thresholds and notification credentials, then start the checker. Web settings are saved in ignored `config/settings.json`.
+Open `http://127.0.0.1:8787`, switch to `Spread Checker`, choose `All market tickers` or `Custom symbols`, configure the minimum display spread %, alert thresholds and notification credentials, then start the checker. Web settings are saved in ignored `config/settings.json`.
 
 ### Notification Setup
 

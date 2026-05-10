@@ -51,7 +51,9 @@ const scannerDefaults = {
 };
 
 const spreadDefaults = {
+  marketScope: "all",
   symbols: "BTC_USDT, ETH_USDT, SOL_USDT",
+  displayMinSpreadPercent: 0.1,
   mexcThresholdPercent: 0.3,
   crossExchangeThresholdPercent: 0.5,
   checkIntervalSec: 3,
@@ -138,7 +140,9 @@ function fillSpreadSettings(settings = {}) {
   if (!spreadForm) {
     return;
   }
+  spreadForm.elements.marketScope.value = settings.marketScope || spreadDefaults.marketScope;
   spreadForm.elements.symbols.value = (settings.symbols || spreadDefaults.symbols).toString();
+  spreadForm.elements.displayMinSpreadPercent.value = settings.displayMinSpreadPercent ?? spreadDefaults.displayMinSpreadPercent;
   spreadForm.elements.mexcThresholdPercent.value = settings.mexcThresholdPercent ?? spreadDefaults.mexcThresholdPercent;
   spreadForm.elements.crossExchangeThresholdPercent.value = settings.crossExchangeThresholdPercent ?? spreadDefaults.crossExchangeThresholdPercent;
   spreadForm.elements.checkIntervalSec.value = settings.checkIntervalSec ?? spreadDefaults.checkIntervalSec;
@@ -456,7 +460,9 @@ function collectScannerConfig() {
 
 function collectSpreadConfig() {
   return {
+    marketScope: spreadForm.elements.marketScope.value,
     symbols: spreadForm.elements.symbols.value,
+    displayMinSpreadPercent: Number(spreadForm.elements.displayMinSpreadPercent.value),
     mexcThresholdPercent: Number(spreadForm.elements.mexcThresholdPercent.value),
     crossExchangeThresholdPercent: Number(spreadForm.elements.crossExchangeThresholdPercent.value),
     checkIntervalSec: Number(spreadForm.elements.checkIntervalSec.value),
@@ -575,7 +581,9 @@ function updateSpread(spread) {
     return;
   }
   spreadStateEl.textContent = spread.running ? (spread.dryRun ? "Running dry-run" : "Running live alerts") : "Stopped";
-  spreadUpdatedEl.textContent = spread.lastUpdated ? new Date(spread.lastUpdated).toLocaleTimeString() : "No data";
+  spreadUpdatedEl.textContent = spread.lastUpdated
+    ? `${spread.rows?.length || 0}/${spread.totalRows || 0} shown | ${new Date(spread.lastUpdated).toLocaleTimeString()}`
+    : "No data";
   renderSpreadRows(spread.rows || [], spread.settings || {});
   renderSpreadAlerts(spread.alerts || []);
 }

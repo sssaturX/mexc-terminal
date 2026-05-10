@@ -56,6 +56,7 @@ interface SavedSpreadCheckerConfig {
   crossExchangeThresholdPercent?: number;
   checkIntervalSec?: number;
   alertCooldownSec?: number;
+  alertLanguage?: "ru" | "en";
   notificationMethod?: "sms" | "push" | "call" | "email_to_sms";
   pushProvider?: "pushover" | "ntfy";
   dryRun?: boolean;
@@ -79,6 +80,7 @@ interface SpreadCheckerConfig {
   crossExchangeThresholdPercent: number;
   checkIntervalSec: number;
   alertCooldownSec: number;
+  alertLanguage: "ru" | "en";
   notificationMethod: "sms" | "push" | "call" | "email_to_sms";
   pushProvider: "pushover" | "ntfy";
   dryRun: boolean;
@@ -99,6 +101,10 @@ interface SpreadRow {
   fairPrice?: number;
   mexcLast?: number;
   gateLast?: number;
+  mexcFundingRate?: number;
+  gateFundingRate?: number;
+  maxLeverage?: number;
+  maxPositionUsdt?: number;
   mexcSpreadPercent?: number;
   crossSpreadPercent?: number;
   mexcDirection?: "MEXC_LAST_ABOVE_FAIR" | "MEXC_LAST_BELOW_FAIR";
@@ -138,11 +144,18 @@ interface MexcTickerPrices {
   fairPrices: Map<string, number>;
   lastPrices: Map<string, number>;
   indexPrices: Map<string, number>;
+  fundingRates: Map<string, number>;
 }
 
 interface GateTickerPrices {
   lastPrices: Map<string, number>;
   indexPrices: Map<string, number>;
+  fundingRates: Map<string, number>;
+}
+
+interface MexcContractDetails {
+  maxLeverage: Map<string, number>;
+  maxPositionBase: Map<string, number>;
 }
 
 interface StrategySchema {
@@ -180,6 +193,7 @@ const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
   crossExchangeThresholdPercent: 0.5,
   checkIntervalSec: 3,
   alertCooldownSec: 300,
+  alertLanguage: "ru",
   notificationMethod: "push",
   pushProvider: "pushover",
   dryRun: true,
@@ -435,7 +449,11 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
       return;
     }
 
-    const [mexcPrices, gatePrices] = await Promise.all([fetchMexcTickerPrices(), fetchGateTickerPrices()]);
+    const [mexcPrices, gatePrices, mexcDetails] = await Promise.all([
+      fetchMexcTickerPrices(),
+      fetchGateTickerPrices(),
+      fetchMexcContractDetails()
+    ]);
     const { fairPrices, lastPrices: mexcLastPrices, indexPrices: mexcIndexPrices } = mexcPrices;
     const symbols = Array.from(new Set([...fairPrices.keys(), ...mexcLastPrices.keys()])).filter(isUsdtPerpetualSymbol).sort();
     const rows: SpreadRow[] = [];
@@ -470,6 +488,10 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
         fairPrice,
         mexcLast,
         gateLast,
+        mexcFundingRate: mexcPrices.fundingRates.get(symbol),
+        gateFundingRate: gatePrices.fundingRates.get(symbol),
+        maxLeverage: mexcDetails.maxLeverage.get(symbol),
+        maxPositionUsdt: maxPositionUsdt(mexcDetails.maxPositionBase.get(symbol), fairPrice),
         mexcSpreadPercent,
         crossSpreadPercent,
         mexcDirection: mexcLast >= fairPrice ? "MEXC_LAST_ABOVE_FAIR" : "MEXC_LAST_BELOW_FAIR",
@@ -492,7 +514,7 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
 }
 
 async function fetchCustomSpreadRows(config: SpreadCheckerConfig, updatedAt: string): Promise<SpreadRow[]> {
-  const gatePrices = await fetchGateTickerPrices();
+  const [gatePrices, mexcDetails] = await Promise.all([fetchGateTickerPrices(), fetchMexcContractDetails()]);
   const rows: SpreadRow[] = [];
   for (const symbol of config.symbols) {
     try {
@@ -519,6 +541,10 @@ async function fetchCustomSpreadRows(config: SpreadCheckerConfig, updatedAt: str
         fairPrice,
         mexcLast,
         gateLast,
+        mexcFundingRate: optionalNumberField(mexcTicker, "fundingRate"),
+        gateFundingRate: gatePrices.fundingRates.get(symbol),
+        maxLeverage: mexcDetails.maxLeverage.get(symbol),
+        maxPositionUsdt: maxPositionUsdt(mexcDetails.maxPositionBase.get(symbol), fairPrice),
         mexcSpreadPercent,
         crossSpreadPercent,
         mexcDirection: mexcLast >= fairPrice ? "MEXC_LAST_ABOVE_FAIR" : "MEXC_LAST_BELOW_FAIR",
@@ -764,6 +790,7 @@ function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadChecker
     ),
     checkIntervalSec: Math.max(1, positiveNumber(record.checkIntervalSec ?? saved?.checkIntervalSec, DEFAULT_SPREAD_CONFIG.checkIntervalSec)),
     alertCooldownSec: Math.max(1, positiveNumber(record.alertCooldownSec ?? saved?.alertCooldownSec, DEFAULT_SPREAD_CONFIG.alertCooldownSec)),
+    alertLanguage: stringOption(record.alertLanguage, saved?.alertLanguage ?? DEFAULT_SPREAD_CONFIG.alertLanguage, ["ru", "en"]),
     notificationMethod,
     pushProvider,
     dryRun: booleanValue(record.dryRun, saved?.dryRun ?? DEFAULT_SPREAD_CONFIG.dryRun),
@@ -1041,6 +1068,34 @@ async function fetchMexcTickerPrices(): Promise<MexcTickerPrices> {
   return rowsToMexcTickerPrices(rows);
 }
 
+async function fetchMexcContractDetails(): Promise<MexcContractDetails> {
+  const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/detail`);
+  const data = dataValue(payload);
+  const rows = Array.isArray(data) ? data : Object.values(data as Record<string, unknown>);
+  const maxLeverage = new Map<string, number>();
+  const maxPositionBase = new Map<string, number>();
+  for (const row of rows) {
+    if (typeof row !== "object" || row === null) {
+      continue;
+    }
+    const record = row as Record<string, unknown>;
+    const symbol = normalizeSymbol(String(record.symbol ?? ""));
+    if (!isUsdtPerpetualSymbol(symbol)) {
+      continue;
+    }
+    const leverage = optionalNumberField(record, "countryConfigContractMaxLeverage") ?? optionalNumberField(record, "maxLeverage");
+    if (leverage !== undefined) {
+      maxLeverage.set(symbol, leverage);
+    }
+    const maxVol = optionalNumberField(record, "maxVol");
+    const contractSize = optionalNumberField(record, "contractSize");
+    if (maxVol !== undefined && contractSize !== undefined) {
+      maxPositionBase.set(symbol, maxVol * contractSize);
+    }
+  }
+  return { maxLeverage, maxPositionBase };
+}
+
 async function fetchMexcFairPrice(symbol: string): Promise<number> {
   const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/fair_price/${encodeURIComponent(symbol)}`);
   const data = dataValue(payload);
@@ -1197,28 +1252,81 @@ async function postForm(url: string, body: URLSearchParams, headers: Record<stri
 }
 
 function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
+  const url = `https://www.mexc.com/futures/${encodeURIComponent(row.symbol)}`;
+  if (config.alertLanguage === "en") {
+    return [
+      `🔴 MEXC Fair/Last spread on ${row.symbol} ${formatFixed(row.mexcSpreadPercent, 2)}%`,
+      url,
+      "",
+      "━━━━━━━━━━━━━━━━━━━━",
+      "💰 Prices:",
+      `  • Last Price (futures): $${formatAlertPrice(row.mexcLast)}`,
+      `  • Fair Price: $${formatAlertPrice(row.fairPrice)}`,
+      "━━━━━━━━━━━━━━━━━━━━",
+      `Max leverage: ${row.maxLeverage ? `${row.maxLeverage}x` : "-"}`,
+      `Max position: ${row.maxPositionUsdt ? `🟢 $${formatMoney(row.maxPositionUsdt)} USDT` : "-"}`,
+      `Direction: ${row.mexcDirection ?? "-"}`,
+      "",
+      `⏰ ${formatUtc(row.updatedAt)} UTC`,
+      "",
+      "MEXC"
+    ].join("\n");
+  }
   return [
-    `ALERT: ${row.symbol}`,
-    "Type: MEXC Fair/Last",
-    `Fair: ${formatPrice(row.fairPrice)}`,
-    `MEXC Last: ${formatPrice(row.mexcLast)}`,
-    `Spread: ${formatFixed(row.mexcSpreadPercent, 4)}%`,
-    `Threshold: ${formatFixed(config.mexcThresholdPercent, 2)}%`,
-    `Direction: ${row.mexcDirection}`,
-    `Time: ${formatUtc(row.updatedAt)} UTC`
+    `🔴 Разница цен на ${row.symbol} ${formatFixed(row.mexcSpreadPercent, 2)}%`,
+    url,
+    "",
+    "━━━━━━━━━━━━━━━━━━━━",
+    "💰 Цены:",
+    `  • Last Price (фьючерс): $${formatAlertPrice(row.mexcLast)}`,
+    `  • Fair Price: $${formatAlertPrice(row.fairPrice)}`,
+    "━━━━━━━━━━━━━━━━━━━━",
+    `Макс. плечо: ${row.maxLeverage ? `${row.maxLeverage}x` : "-"}`,
+    `Макс. позиция: ${row.maxPositionUsdt ? `🟢 $${formatMoney(row.maxPositionUsdt)} USDT` : "-"}`,
+    `Направление: ${row.mexcDirection ?? "-"}`,
+    "",
+    `⏰ ${formatUtc(row.updatedAt)} UTC`,
+    "",
+    "MEXC"
   ].join("\n");
 }
 
 function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
+  const base = row.symbol.replace(/_USDT$/, "");
+  const mexcLast = row.mexcLast ?? 0;
+  const gateLast = row.gateLast ?? 0;
+  const longExchange = gateLast < mexcLast ? "GATE" : "MEXC";
+  const shortExchange = gateLast < mexcLast ? "MEXC" : "GATE";
+  const longPrice = gateLast < mexcLast ? gateLast : mexcLast;
+  const shortPrice = gateLast < mexcLast ? mexcLast : gateLast;
+  const fundingMexc = formatFunding(row.mexcFundingRate);
+  const fundingGate = formatFunding(row.gateFundingRate);
+
+  if (config.alertLanguage === "en") {
+    return [
+      `📈📈 #${base} | Spread: ${formatFixed(row.crossSpreadPercent, 2)}%`,
+      `📌 ${row.symbol} (COPY: ${base})`,
+      "",
+      `🟢 Long  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
+      `🔴 Short ${shortExchange.padEnd(5)}: $${formatAlertPrice(shortPrice)}`,
+      "",
+      `🌗 Funding MEXC : ${fundingMexc}`,
+      `🌓 Funding GATE : ${fundingGate}`,
+      "",
+      `⏰ ${formatUtc(row.updatedAt)} UTC`
+    ].join("\n");
+  }
   return [
-    `ALERT: ${row.symbol}`,
-    "Type: Gate vs MEXC",
-    `Gate Last: ${formatPrice(row.gateLast)}`,
-    `MEXC Last: ${formatPrice(row.mexcLast)}`,
-    `Spread: ${formatFixed(row.crossSpreadPercent, 4)}%`,
-    `Threshold: ${formatFixed(config.crossExchangeThresholdPercent, 2)}%`,
-    `Direction: ${row.crossDirection}`,
-    `Time: ${formatUtc(row.updatedAt)} UTC`
+    `📈📈 #${base} | Спред: ${formatFixed(row.crossSpreadPercent, 2)}%`,
+    `📌 ${row.symbol} (COPY: ${base})`,
+    "",
+    `🟢 Лонг  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
+    `🔴 Шорт ${shortExchange.padEnd(5)}: $${formatAlertPrice(shortPrice)}`,
+    "",
+    `🌗 Funding MEXC : ${fundingMexc}`,
+    `🌓 Funding GATE : ${fundingGate}`,
+    "",
+    `⏰ ${formatUtc(row.updatedAt)} UTC`
   ].join("\n");
 }
 
@@ -1255,17 +1363,23 @@ function optionalNumberField(record: Record<string, unknown>, key: string): numb
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+function optionalFiniteNumberField(record: Record<string, unknown>, key: string): number | undefined {
+  const value = Number(record[key]);
+  return Number.isFinite(value) ? value : undefined;
+}
+
 function rowsToMexcTickerPrices(rows: unknown[]): MexcTickerPrices {
   const fairPrices = new Map<string, number>();
   const lastPrices = new Map<string, number>();
   const indexPrices = new Map<string, number>();
+  const fundingRates = new Map<string, number>();
   for (const row of rows) {
     if (typeof row !== "object" || row === null) {
       continue;
     }
     const record = row as Record<string, unknown>;
     const symbol = normalizeSymbol(String(record.symbol ?? ""));
-    if (!isUsdtPerpetualSymbol(symbol) || isExcludedSyntheticSymbol(symbol)) {
+    if (!isUsdtPerpetualSymbol(symbol)) {
       continue;
     }
     const fairPrice = optionalNumberField(record, "fairPrice");
@@ -1281,23 +1395,28 @@ function rowsToMexcTickerPrices(rows: unknown[]): MexcTickerPrices {
     if (indexPrice !== undefined) {
       indexPrices.set(symbol, indexPrice);
     }
+    const fundingRate = optionalFiniteNumberField(record, "fundingRate");
+    if (fundingRate !== undefined) {
+      fundingRates.set(symbol, fundingRate);
+    }
   }
   if (fairPrices.size === 0 || lastPrices.size === 0) {
     throw new Error("MEXC ticker response did not contain active USDT prices");
   }
-  return { fairPrices, lastPrices, indexPrices };
+  return { fairPrices, lastPrices, indexPrices, fundingRates };
 }
 
 function rowsToGateTickerPrices(rows: unknown[]): GateTickerPrices {
   const lastPrices = new Map<string, number>();
   const indexPrices = new Map<string, number>();
+  const fundingRates = new Map<string, number>();
   for (const row of rows) {
     if (typeof row !== "object" || row === null) {
       continue;
     }
     const record = row as Record<string, unknown>;
     const symbol = normalizeSymbol(String(record.contract ?? ""));
-    if (!isUsdtPerpetualSymbol(symbol) || isExcludedSyntheticSymbol(symbol)) {
+    if (!isUsdtPerpetualSymbol(symbol)) {
       continue;
     }
     const lastPrice = optionalNumberField(record, "last");
@@ -1309,11 +1428,15 @@ function rowsToGateTickerPrices(rows: unknown[]): GateTickerPrices {
     if (indexPrice !== undefined) {
       indexPrices.set(symbol, indexPrice);
     }
+    const fundingRate = optionalFiniteNumberField(record, "funding_rate");
+    if (fundingRate !== undefined) {
+      fundingRates.set(symbol, fundingRate);
+    }
   }
   if (lastPrices.size === 0) {
     throw new Error("Gate.io ticker response did not contain active USDT prices");
   }
-  return { lastPrices, indexPrices };
+  return { lastPrices, indexPrices, fundingRates };
 }
 
 function isCrossCompatible(input: { mexcLast: number; gateLast: number; mexcIndex?: number; gateIndex?: number }): boolean {
@@ -1321,6 +1444,13 @@ function isCrossCompatible(input: { mexcLast: number; gateLast: number; mexcInde
     return (Math.abs(input.gateIndex - input.mexcIndex) / input.mexcIndex) * 100 <= CROSS_INDEX_COMPATIBILITY_MAX_PERCENT;
   }
   return (Math.abs(input.gateLast - input.mexcLast) / input.mexcLast) * 100 <= CROSS_LAST_PRICE_SANITY_MAX_PERCENT;
+}
+
+function maxPositionUsdt(maxPositionBase: number | undefined, price: number): number | undefined {
+  if (maxPositionBase === undefined || !Number.isFinite(price) || price <= 0) {
+    return undefined;
+  }
+  return maxPositionBase * price;
 }
 
 function requireSpreadFields(config: SpreadCheckerConfig, fields: Array<keyof SpreadCheckerConfig>): void {
@@ -1347,6 +1477,27 @@ function stringValue(value: unknown, fallback = ""): string {
 
 function formatPrice(value: number | undefined): string {
   return value === undefined ? "-" : value.toFixed(2);
+}
+
+function formatAlertPrice(value: number | undefined): string {
+  if (value === undefined) {
+    return "-";
+  }
+  if (Math.abs(value) >= 1000) {
+    return value.toFixed(2);
+  }
+  if (Math.abs(value) >= 1) {
+    return value.toFixed(4);
+  }
+  return value.toFixed(9).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function formatMoney(value: number): string {
+  return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatFunding(value: number | undefined): string {
+  return value === undefined ? "-" : `${(value * 100).toFixed(2)}%`;
 }
 
 function formatFixed(value: number | undefined, digits: number): string {

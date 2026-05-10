@@ -58,6 +58,7 @@ const spreadDefaults = {
   crossExchangeThresholdPercent: 0.5,
   checkIntervalSec: 3,
   alertCooldownSec: 300,
+  alertLanguage: "ru",
   notificationMethod: "push",
   pushProvider: "pushover",
   dryRun: true,
@@ -147,6 +148,7 @@ function fillSpreadSettings(settings = {}) {
   spreadForm.elements.crossExchangeThresholdPercent.value = settings.crossExchangeThresholdPercent ?? spreadDefaults.crossExchangeThresholdPercent;
   spreadForm.elements.checkIntervalSec.value = settings.checkIntervalSec ?? spreadDefaults.checkIntervalSec;
   spreadForm.elements.alertCooldownSec.value = settings.alertCooldownSec ?? spreadDefaults.alertCooldownSec;
+  spreadForm.elements.alertLanguage.value = settings.alertLanguage || spreadDefaults.alertLanguage;
   spreadForm.elements.notificationMethod.value = settings.notificationMethod || spreadDefaults.notificationMethod;
   spreadForm.elements.pushProvider.value = settings.pushProvider || spreadDefaults.pushProvider;
   spreadForm.elements.dryRun.checked = settings.dryRun ?? spreadDefaults.dryRun;
@@ -467,6 +469,7 @@ function collectSpreadConfig() {
     crossExchangeThresholdPercent: Number(spreadForm.elements.crossExchangeThresholdPercent.value),
     checkIntervalSec: Number(spreadForm.elements.checkIntervalSec.value),
     alertCooldownSec: Number(spreadForm.elements.alertCooldownSec.value),
+    alertLanguage: spreadForm.elements.alertLanguage.value,
     notificationMethod: spreadForm.elements.notificationMethod.value,
     pushProvider: spreadForm.elements.pushProvider.value,
     dryRun: spreadForm.elements.dryRun.checked,

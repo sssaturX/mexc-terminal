@@ -607,16 +607,21 @@ function renderSpreadRows(rows, settings) {
       continue;
     }
     const mexcClass = item.mexcTriggered ? "negative" : "positive";
-    const crossClass = item.crossTriggered ? "negative" : "positive";
+    const crossClass = item.crossSpreadPercent === undefined ? "muted-cell" : item.crossTriggered ? "negative" : "positive";
+    const gateCell = item.gateLast === undefined ? `<span class="muted-cell">-</span>` : formatNumber(item.gateLast);
+    const crossCell =
+      item.crossSpreadPercent === undefined
+        ? `<span class="muted-cell">-</span>`
+        : `${formatPlainPercent(item.crossSpreadPercent)} / ${formatPlainPercent(settings.crossExchangeThresholdPercent)}`;
     row.innerHTML = `
       <td><strong>${escapeHtml(item.symbol)}</strong></td>
       <td>${formatNumber(item.fairPrice)}</td>
       <td>${formatNumber(item.mexcLast)}</td>
-      <td>${item.gateLast === undefined ? "-" : formatNumber(item.gateLast)}</td>
+      <td>${gateCell}</td>
       <td class="${mexcClass}">${formatPlainPercent(item.mexcSpreadPercent)} / ${formatPlainPercent(settings.mexcThresholdPercent)}</td>
       <td>${escapeHtml(item.mexcDirection || "-")}</td>
-      <td class="${crossClass}">${item.crossSpreadPercent === undefined ? "-" : `${formatPlainPercent(item.crossSpreadPercent)} / ${formatPlainPercent(settings.crossExchangeThresholdPercent)}`}</td>
-      <td>${escapeHtml(item.crossDirection || "-")}</td>
+      <td class="${crossClass}">${crossCell}</td>
+      <td>${item.crossDirection ? escapeHtml(item.crossDirection) : `<span class="muted-cell">-</span>`}</td>
     `;
     spreadRowsEl.appendChild(row);
   }

@@ -509,6 +509,10 @@ button:disabled {
   color: var(--red);
 }
 
+.muted-cell {
+  color: var(--muted);
+}
+
 @media (max-width: 1050px) {
   .layout,
   .spread-layout,

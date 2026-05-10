@@ -592,7 +592,7 @@ function renderSpreadRows(rows, settings) {
   spreadRowsEl.innerHTML = "";
   if (rows.length === 0) {
     const row = document.createElement("tr");
-    row.innerHTML = `<td colspan="7" class="table-empty">No spread data yet</td>`;
+    row.innerHTML = `<td colspan="8" class="table-empty">No spread data yet</td>`;
     spreadRowsEl.appendChild(row);
     return;
   }
@@ -601,7 +601,7 @@ function renderSpreadRows(rows, settings) {
     if (item.error) {
       row.innerHTML = `
         <td>${escapeHtml(item.symbol)}</td>
-        <td colspan="6" class="negative">${escapeHtml(item.error)}</td>
+        <td colspan="7" class="negative">${escapeHtml(item.error)}</td>
       `;
       spreadRowsEl.appendChild(row);
       continue;
@@ -612,10 +612,11 @@ function renderSpreadRows(rows, settings) {
       <td><strong>${escapeHtml(item.symbol)}</strong></td>
       <td>${formatNumber(item.fairPrice)}</td>
       <td>${formatNumber(item.mexcLast)}</td>
-      <td>${formatNumber(item.gateLast)}</td>
+      <td>${item.gateLast === undefined ? "-" : formatNumber(item.gateLast)}</td>
       <td class="${mexcClass}">${formatPlainPercent(item.mexcSpreadPercent)} / ${formatPlainPercent(settings.mexcThresholdPercent)}</td>
-      <td class="${crossClass}">${formatPlainPercent(item.crossSpreadPercent)} / ${formatPlainPercent(settings.crossExchangeThresholdPercent)}</td>
-      <td>${escapeHtml([item.mexcDirection, item.crossDirection].filter(Boolean).join(" | "))}</td>
+      <td>${escapeHtml(item.mexcDirection || "-")}</td>
+      <td class="${crossClass}">${item.crossSpreadPercent === undefined ? "-" : `${formatPlainPercent(item.crossSpreadPercent)} / ${formatPlainPercent(settings.crossExchangeThresholdPercent)}`}</td>
+      <td>${escapeHtml(item.crossDirection || "-")}</td>
     `;
     spreadRowsEl.appendChild(row);
   }

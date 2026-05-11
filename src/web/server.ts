@@ -234,6 +234,7 @@ const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
   ntfyToken: "",
   emailToSmsAddress: ""
 };
+let cachedSymbols: { symbols: string[]; expiresAt: number } | undefined;
 
 const strategySchemas: StrategySchema[] = [
   schema("RandomCoinflipScalper", [{ name: "probability", label: "Trade probability per tick", type: "number", initial: 0.03 }]),
@@ -335,7 +336,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (url.pathname === "/api/bootstrap") {
     return sendJson(res, 200, {
       saved: readSaved(),
-      symbols: buildSymbols(readSaved()),
+      symbols: await buildSymbols(readSaved()),
       strategies: strategySchemas,
       running: runtimes.length > 0,
       scanner: currentScannerStatus(),
@@ -1978,8 +1979,31 @@ function isExcludedSyntheticSymbol(symbol: string): boolean {
   );
 }
 
-function buildSymbols(saved?: SavedWebConfig): string[] {
-  return Array.from(
-    new Set([saved?.symbol, ...(saved?.symbolHistory ?? []), ...POPULAR_SYMBOLS].filter((item): item is string => Boolean(item)))
-  );
+async function buildSymbols(saved?: SavedWebConfig): Promise<string[]> {
+  const savedSymbols = [saved?.symbol, ...(saved?.symbolHistory ?? [])].filter((item): item is string => Boolean(item));
+  const contractSymbols = await getCachedContractSymbols();
+  return Array.from(new Set([...savedSymbols, ...contractSymbols, ...POPULAR_SYMBOLS].filter(isUsdtPerpetualSymbol))).sort();
+}
+
+async function getCachedContractSymbols(): Promise<string[]> {
+  const now = Date.now();
+  if (cachedSymbols && cachedSymbols.expiresAt > now) {
+    return cachedSymbols.symbols;
+  }
+  try {
+    const payload = await fetchJson(`${MEXC_CONTRACT_BASE_URL}/api/v1/contract/detail`);
+    const data = dataValue(payload);
+    const rows = Array.isArray(data) ? data : Object.values(data as Record<string, unknown>);
+    const symbols = rows
+      .map((row) => (typeof row === "object" && row !== null ? normalizeSymbol(String((row as Record<string, unknown>).symbol ?? "")) : ""))
+      .filter((symbol) => isUsdtPerpetualSymbol(symbol) && !isExcludedSyntheticSymbol(symbol))
+      .sort();
+    if (symbols.length > 0) {
+      cachedSymbols = { symbols, expiresAt: now + 10 * 60 * 1000 };
+      return symbols;
+    }
+  } catch (error) {
+    pushWebLog("WARN", `Symbol list refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return POPULAR_SYMBOLS;
 }

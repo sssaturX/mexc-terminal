@@ -240,6 +240,49 @@ textarea:focus {
   gap: 8px;
 }
 
+.symbol-suggest-host {
+  position: relative;
+}
+
+.symbol-suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 20;
+  display: grid;
+  gap: 4px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.32);
+}
+
+.symbol-suggest[hidden] {
+  display: none;
+}
+
+.symbol-suggest-item {
+  height: 34px;
+  padding: 0 10px;
+  border-color: transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font-weight: 800;
+}
+
+.symbol-suggest-item:hover,
+.symbol-suggest-item.active {
+  background: rgba(64, 200, 224, 0.13);
+  color: var(--cyan);
+  transform: none;
+}
+
 .account-toolbar {
   display: flex;
   align-items: center;
@@ -1180,4 +1223,18 @@ button:active:not(:disabled) {
   .check {
     padding: 0 8px;
   }
+}
+
+.symbol-suggest {
+  border-color: var(--line-soft);
+  background: #111513;
+  box-shadow: 0 18px 38px rgba(0, 0, 0, 0.34);
+}
+
+.symbol-suggest-item:hover,
+.symbol-suggest-item.active {
+  background: rgba(64, 200, 224, 0.13);
+  color: var(--cyan);
+  transform: none !important;
+  box-shadow: none !important;
 }

@@ -20,6 +20,7 @@ const spreadAlertsEl = document.querySelector("#spreadAlerts");
 const spreadStateEl = document.querySelector("#spreadState");
 const spreadUpdatedEl = document.querySelector("#spreadUpdated");
 let strategies = [];
+let symbolSuggestions = [];
 let eventsBound = false;
 let eventsConnected = false;
 let accountCounter = 0;
@@ -86,6 +87,7 @@ boot();
 async function boot() {
   const data = await api("/api/bootstrap");
   strategies = data.strategies;
+  symbolSuggestions = Array.isArray(data.symbols) ? data.symbols : [];
   fillStrategies();
   fillSymbols(data.symbols, data.saved?.symbol);
   fillSaved(data.saved);
@@ -94,6 +96,7 @@ async function boot() {
   renderParams();
   if (!eventsBound) {
     bindEvents();
+    bindSymbolSuggesters();
     eventsBound = true;
   }
   connectEvents();
@@ -302,6 +305,132 @@ function activateTab(tabId) {
   if (tabId === "terminalTab") {
     void refreshTerminal();
   }
+}
+
+function bindSymbolSuggesters() {
+  attachSymbolSuggest(form.elements.symbol);
+  attachSymbolSuggest(terminalForm.elements.symbol);
+  attachSymbolSuggest(form.elements.scannerSymbols, { multi: true });
+  attachSymbolSuggest(spreadForm.elements.symbols, { multi: true });
+}
+
+function attachSymbolSuggest(input, options = {}) {
+  if (!input) {
+    return;
+  }
+  const host = input.parentElement;
+  host.classList.add("symbol-suggest-host");
+  const list = document.createElement("div");
+  list.className = "symbol-suggest";
+  list.hidden = true;
+  host.appendChild(list);
+  let activeIndex = -1;
+  let currentItems = [];
+
+  const close = () => {
+    list.hidden = true;
+    activeIndex = -1;
+  };
+  const render = () => {
+    const token = currentSymbolToken(input, Boolean(options.multi));
+    const query = normalizeSymbol(token.value);
+    currentItems = matchSymbols(query);
+    list.innerHTML = "";
+    if (currentItems.length === 0 || query.length === 0) {
+      close();
+      return;
+    }
+    currentItems.forEach((symbol, index) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "symbol-suggest-item";
+      item.classList.toggle("active", index === activeIndex);
+      item.textContent = symbol;
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        applySymbolSuggestion(input, symbol, Boolean(options.multi));
+        close();
+      });
+      list.appendChild(item);
+    });
+    list.hidden = false;
+  };
+
+  input.addEventListener("input", render);
+  input.addEventListener("focus", render);
+  input.addEventListener("blur", () => window.setTimeout(close, 120));
+  input.addEventListener("keydown", (event) => {
+    if (list.hidden || currentItems.length === 0) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      activeIndex = (activeIndex + 1) % currentItems.length;
+      render();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      activeIndex = activeIndex <= 0 ? currentItems.length - 1 : activeIndex - 1;
+      render();
+    } else if (event.key === "Enter" && activeIndex >= 0) {
+      event.preventDefault();
+      applySymbolSuggestion(input, currentItems[activeIndex], Boolean(options.multi));
+      close();
+    } else if (event.key === "Escape") {
+      close();
+    }
+  });
+}
+
+function matchSymbols(query) {
+  if (!query) {
+    return [];
+  }
+  const normalized = query.replace(/[^A-Z0-9_]/g, "");
+  const baseQuery = normalized.replace(/_?USDT$/, "");
+  const starts = [];
+  const includes = [];
+  for (const symbol of symbolSuggestions) {
+    const base = symbol.replace(/_USDT$/, "");
+    if (symbol.startsWith(normalized) || base.startsWith(baseQuery)) {
+      starts.push(symbol);
+    } else if (symbol.includes(normalized) || base.includes(baseQuery)) {
+      includes.push(symbol);
+    }
+  }
+  return [...starts, ...includes].slice(0, 14);
+}
+
+function currentSymbolToken(input, multi) {
+  if (!multi) {
+    return { value: input.value, start: 0, end: input.value.length };
+  }
+  const cursor = input.selectionStart ?? input.value.length;
+  const before = input.value.slice(0, cursor);
+  const after = input.value.slice(cursor);
+  const start = Math.max(before.lastIndexOf(","), before.lastIndexOf("\n")) + 1;
+  const nextComma = after.search(/[,\n]/);
+  const end = nextComma === -1 ? input.value.length : cursor + nextComma;
+  return {
+    value: input.value.slice(start, end).trim(),
+    start,
+    end
+  };
+}
+
+function applySymbolSuggestion(input, symbol, multi) {
+  if (!multi) {
+    input.value = symbol;
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+    return;
+  }
+  const token = currentSymbolToken(input, true);
+  const before = input.value.slice(0, token.start);
+  const after = input.value.slice(token.end);
+  const prefix = before && !/[,\n]\s*$/.test(before) ? `${before}, ` : before;
+  input.value = `${prefix}${symbol}${after.startsWith(",") || after.startsWith("\n") || after.length === 0 ? after : `, ${after}`}`;
+  const cursor = `${prefix}${symbol}`.length;
+  input.setSelectionRange(cursor, cursor);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 function normalizeAccounts(saved = {}) {

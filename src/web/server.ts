@@ -185,6 +185,7 @@ const MEXC_CONTRACT_BASE_URL = "https://contract.mexc.com";
 const GATE_API_BASE_URL = "https://api.gateio.ws/api/v4";
 const CROSS_INDEX_COMPATIBILITY_MAX_PERCENT = 5;
 const CROSS_LAST_PRICE_SANITY_MAX_PERCENT = 20;
+const SPREAD_DISPLAY_LINGER_MS = 3 * 60 * 1000;
 const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
   marketScope: "all",
   symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -280,6 +281,10 @@ let spreadCheckerRunning = false;
 let spreadRows: SpreadRow[] = [];
 let spreadAlerts: SpreadAlert[] = [];
 const spreadAlertStates = new Map<string, SpreadAlertState>();
+const spreadVisibleRows = new Map<string, number>();
+const spreadDisplayOrder = new Map<string, number>();
+let spreadDisplayFilterKey = "";
+let spreadDisplayOrderCounter = 0;
 const clients = new Set<ServerResponse>();
 const recentLogs: Array<{ level: string; message: string; timestamp: string }> = [];
 
@@ -423,6 +428,10 @@ async function startSpreadChecker(config: SpreadCheckerConfig): Promise<void> {
   spreadRows = [];
   spreadAlerts = [];
   spreadAlertStates.clear();
+  spreadVisibleRows.clear();
+  spreadDisplayOrder.clear();
+  spreadDisplayFilterKey = "";
+  spreadDisplayOrderCounter = 0;
   await runSpreadCheckerCycle(config);
   spreadCheckerTimer = setInterval(() => {
     void runSpreadCheckerCycle(config);
@@ -954,14 +963,17 @@ function currentScannerStatus(): unknown {
 }
 
 function currentSpreadStatus(config = buildSpreadCheckerConfig({})): SpreadRuntimeStatus {
+  const filterKey = `${config.marketScope}:${config.displayMinSpreadPercent}`;
+  if (filterKey !== spreadDisplayFilterKey) {
+    spreadVisibleRows.clear();
+    spreadDisplayOrder.clear();
+    spreadDisplayFilterKey = filterKey;
+    spreadDisplayOrderCounter = 0;
+  }
+  const now = Date.now();
   const visibleRows = spreadRows
-    .filter((row) => {
-      if (row.error) {
-        return config.marketScope === "custom";
-      }
-      return Math.max(row.mexcSpreadPercent ?? 0, row.crossSpreadPercent ?? 0) >= config.displayMinSpreadPercent;
-    })
-    .sort((left, right) => Math.max(right.mexcSpreadPercent ?? 0, right.crossSpreadPercent ?? 0) - Math.max(left.mexcSpreadPercent ?? 0, left.crossSpreadPercent ?? 0));
+    .filter((row) => shouldShowSpreadRow(config, row, now))
+    .sort((left, right) => spreadRowDisplayOrder(left) - spreadRowDisplayOrder(right));
   return {
     running: spreadCheckerRunning,
     rows: visibleRows,
@@ -971,6 +983,45 @@ function currentSpreadStatus(config = buildSpreadCheckerConfig({})): SpreadRunti
     dryRun: config.dryRun,
     settings: config
   };
+}
+
+function shouldShowSpreadRow(config: SpreadCheckerConfig, row: SpreadRow, now: number): boolean {
+  if (row.error) {
+    return config.marketScope === "custom";
+  }
+  const spreadPercent = Math.max(row.mexcSpreadPercent ?? 0, row.crossSpreadPercent ?? 0);
+  if (config.displayMinSpreadPercent <= 0) {
+    ensureSpreadDisplayOrder(row.symbol);
+    return true;
+  }
+  const releasePercent = Math.max(0, config.displayMinSpreadPercent * 0.8);
+  if (spreadPercent >= config.displayMinSpreadPercent) {
+    spreadVisibleRows.set(row.symbol, now);
+    ensureSpreadDisplayOrder(row.symbol);
+    return true;
+  }
+  const lastAboveThreshold = spreadVisibleRows.get(row.symbol);
+  if (
+    lastAboveThreshold !== undefined &&
+    (spreadPercent >= releasePercent || now - lastAboveThreshold <= SPREAD_DISPLAY_LINGER_MS)
+  ) {
+    ensureSpreadDisplayOrder(row.symbol);
+    return true;
+  }
+  spreadVisibleRows.delete(row.symbol);
+  spreadDisplayOrder.delete(row.symbol);
+  return false;
+}
+
+function ensureSpreadDisplayOrder(symbol: string): void {
+  if (!spreadDisplayOrder.has(symbol)) {
+    spreadDisplayOrderCounter += 1;
+    spreadDisplayOrder.set(symbol, spreadDisplayOrderCounter);
+  }
+}
+
+function spreadRowDisplayOrder(row: SpreadRow): number {
+  return spreadDisplayOrder.get(row.symbol) ?? Number.MAX_SAFE_INTEGER;
 }
 
 function readSaved(): SavedWebConfig | undefined {

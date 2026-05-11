@@ -592,22 +592,35 @@ function updateSpread(spread) {
 }
 
 function renderSpreadRows(rows, settings) {
-  spreadRowsEl.innerHTML = "";
   if (rows.length === 0) {
+    spreadRowsEl.innerHTML = "";
     const row = document.createElement("tr");
+    row.dataset.empty = "true";
     row.innerHTML = `<td colspan="8" class="table-empty">No spread data yet</td>`;
     spreadRowsEl.appendChild(row);
     return;
   }
-  for (const item of rows) {
-    const row = document.createElement("tr");
+
+  const existingRows = new Map(
+    Array.from(spreadRowsEl.querySelectorAll("tr[data-symbol]")).map((row) => [row.dataset.symbol, row])
+  );
+  const expectedSymbols = new Set(rows.map((item) => item.symbol));
+  for (const row of Array.from(spreadRowsEl.children)) {
+    if (row.dataset.empty === "true" || !expectedSymbols.has(row.dataset.symbol)) {
+      row.remove();
+    }
+  }
+
+  rows.forEach((item, index) => {
+    const row = existingRows.get(item.symbol) || document.createElement("tr");
+    row.dataset.symbol = item.symbol;
     if (item.error) {
       row.innerHTML = `
         <td>${escapeHtml(item.symbol)}</td>
         <td colspan="7" class="negative">${escapeHtml(item.error)}</td>
       `;
-      spreadRowsEl.appendChild(row);
-      continue;
+      insertSpreadRow(row, index);
+      return;
     }
     const mexcClass = item.mexcTriggered ? "negative" : "positive";
     const crossClass = item.crossSpreadPercent === undefined ? "muted-cell" : item.crossTriggered ? "negative" : "positive";
@@ -626,7 +639,14 @@ function renderSpreadRows(rows, settings) {
       <td class="${crossClass}">${crossCell}</td>
       <td>${item.crossDirection ? escapeHtml(item.crossDirection) : `<span class="muted-cell">-</span>`}</td>
     `;
-    spreadRowsEl.appendChild(row);
+    insertSpreadRow(row, index);
+  });
+}
+
+function insertSpreadRow(row, index) {
+  const current = spreadRowsEl.children[index];
+  if (current !== row) {
+    spreadRowsEl.insertBefore(row, current || null);
   }
 }
 

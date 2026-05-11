@@ -1,10 +1,17 @@
 const form = document.querySelector("#configForm");
 const spreadForm = document.querySelector("#spreadForm");
+const terminalForm = document.querySelector("#terminalForm");
 const logsEl = document.querySelector("#logs");
 const strategySelect = form.elements.strategyName;
 const strategyParamsEl = document.querySelector("#strategyParams");
 const accountsListEl = document.querySelector("#accountsList");
 const accountsStatusEl = document.querySelector("#accountsStatus");
+const terminalAccountsEl = document.querySelector("#terminalAccounts");
+const terminalMarginsEl = document.querySelector("#terminalMargins");
+const terminalStateEl = document.querySelector("#terminalState");
+const terminalUpdatedEl = document.querySelector("#terminalUpdated");
+const terminalEquityEl = document.querySelector("#terminalEquity");
+const terminalAvailableEl = document.querySelector("#terminalAvailable");
 const scannerTopEl = document.querySelector("#scannerTop");
 const scannerAlertsEl = document.querySelector("#scannerAlerts");
 const scannerStateEl = document.querySelector("#scannerState");
@@ -65,6 +72,15 @@ const spreadDefaults = {
   ntfyServer: "https://ntfy.sh"
 };
 
+const terminalDefaults = {
+  symbol: "BTC_USDT",
+  accountMode: "single",
+  margin: 10,
+  leverage: 10,
+  dryRun: true,
+  accountMargins: {}
+};
+
 boot();
 
 async function boot() {
@@ -74,6 +90,7 @@ async function boot() {
   fillSymbols(data.symbols, data.saved?.symbol);
   fillSaved(data.saved);
   fillSpreadSettings(data.spread?.settings || data.saved?.spreadChecker);
+  fillTerminalSettings(data.terminal?.settings || data.saved?.terminal || data.saved);
   renderParams();
   if (!eventsBound) {
     bindEvents();
@@ -83,6 +100,7 @@ async function boot() {
   updateStatus(data.status);
   updateScanner(data.scanner);
   updateSpread(data.spread);
+  updateTerminal(data.terminal);
 }
 
 function fillStrategies() {
@@ -164,6 +182,21 @@ function fillSpreadSettings(settings = {}) {
   spreadForm.elements.emailToSmsAddress.value = settings.emailToSmsAddress || "";
 }
 
+function fillTerminalSettings(settings = {}) {
+  if (!terminalForm) {
+    return;
+  }
+  terminalForm.elements.symbol.value = settings.symbol || terminalDefaults.symbol;
+  terminalForm.elements.accountMode.value = settings.accountMode || terminalDefaults.accountMode;
+  terminalForm.elements.margin.value = settings.margin ?? terminalDefaults.margin;
+  terminalForm.elements.leverage.value = settings.leverage ?? terminalDefaults.leverage;
+  terminalForm.elements.dryRun.checked = settings.dryRun ?? terminalDefaults.dryRun;
+  terminalForm.dataset.accountMargins = JSON.stringify(settings.accountMargins || terminalDefaults.accountMargins);
+  if (settings.accountId) {
+    terminalForm.dataset.accountId = settings.accountId;
+  }
+}
+
 function bindEvents() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
     button.addEventListener("click", () => activateTab(button.dataset.tab));
@@ -239,6 +272,15 @@ function bindEvents() {
     const data = await api("/api/spread-checker/stop", "POST", {});
     updateSpread(data.spread);
   });
+  document.querySelector("#refreshTerminalBtn").addEventListener("click", refreshTerminal);
+  terminalForm.elements.accountMode.addEventListener("change", () => {
+    renderTerminalMargins(currentTerminalAccounts(), readTerminalMargins());
+  });
+  document.querySelectorAll("[data-terminal-action]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      await submitTerminalOrder(button.dataset.terminalAction);
+    });
+  });
   document.querySelector("#reloadSaved").addEventListener("click", boot);
   document.querySelector("#clearLogs").addEventListener("click", () => {
     logsEl.innerHTML = "";
@@ -257,6 +299,9 @@ function activateTab(tabId) {
   document.querySelectorAll(".tab-panel").forEach((panel) => {
     panel.classList.toggle("active", panel.id === tabId);
   });
+  if (tabId === "terminalTab") {
+    void refreshTerminal();
+  }
 }
 
 function normalizeAccounts(saved = {}) {
@@ -591,6 +636,185 @@ function updateSpread(spread) {
   renderSpreadAlerts(spread.alerts || []);
 }
 
+function updateTerminal(terminal) {
+  if (!terminal || !terminalForm || !terminalAccountsEl) {
+    return;
+  }
+  terminalForm.dataset.accounts = JSON.stringify(terminal.accounts || []);
+  terminalStateEl.textContent = `${terminal.accounts?.length || 0} accounts`;
+  terminalUpdatedEl.textContent = terminal.refreshedAt ? new Date(terminal.refreshedAt).toLocaleTimeString() : "No data";
+  terminalEquityEl.textContent = `${formatMoney(terminal.totalEquity || 0)} USDT`;
+  terminalAvailableEl.textContent = `${formatMoney(terminal.totalAvailable || 0)} USDT`;
+  renderTerminalAccountSelect(terminal.accounts || [], terminal.settings || {});
+  renderTerminalMargins(terminal.accounts || [], terminal.settings?.accountMargins || readTerminalMargins());
+  renderTerminalAccounts(terminal.accounts || []);
+}
+
+function renderTerminalAccountSelect(accounts, settings) {
+  const select = terminalForm.elements.accountId;
+  const previous = select.value || terminalForm.dataset.accountId || settings.accountId;
+  select.innerHTML = accounts
+    .map((account) => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)}${account.role === "master" ? " (master)" : ""}</option>`)
+    .join("");
+  const first = accounts[0]?.id || "";
+  select.value = accounts.some((account) => account.id === previous) ? previous : first;
+  terminalForm.dataset.accountId = select.value;
+}
+
+function renderTerminalMargins(accounts, margins) {
+  terminalMarginsEl.innerHTML = "";
+  if (accounts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "No saved accounts";
+    terminalMarginsEl.appendChild(empty);
+    return;
+  }
+  for (const account of accounts) {
+    const row = document.createElement("div");
+    row.className = "terminal-margin-row";
+    row.dataset.accountId = account.id;
+    const marginValue = Number(margins[account.id] ?? terminalForm.elements.margin.value ?? terminalDefaults.margin);
+    row.innerHTML = `
+      <div>
+        <strong>${escapeHtml(account.name)}</strong>
+        <div class="hint">${account.role === "master" ? "master" : "slave"}</div>
+      </div>
+      <label>
+        <span>Margin USDT</span>
+        <input name="terminalAccountMargin" type="number" min="0.1" step="0.1" value="${marginValue}" />
+      </label>
+    `;
+    terminalMarginsEl.appendChild(row);
+  }
+}
+
+function renderTerminalAccounts(accounts) {
+  terminalAccountsEl.innerHTML = "";
+  if (accounts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "No saved MEXC accounts";
+    terminalAccountsEl.appendChild(empty);
+    return;
+  }
+  for (const account of accounts) {
+    const card = document.createElement("div");
+    card.className = "terminal-account-card";
+    const balance = account.balance || {};
+    const positions = Array.isArray(account.positions) ? account.positions : [];
+    card.innerHTML = `
+      <div class="terminal-account-head">
+        <strong>${escapeHtml(account.name)}${account.role === "master" ? " (master)" : ""}</strong>
+        <span class="${account.error ? "negative" : "positive"}">${account.error ? "ERROR" : "OK"}</span>
+      </div>
+      ${
+        account.error
+          ? `<div class="terminal-position-row negative">${escapeHtml(account.error)}</div>`
+          : `<div class="terminal-account-stats">
+              <span>Equity ${formatMoney(balance.equity)} USDT</span>
+              <span>Available ${formatMoney(balance.availableBalance)} USDT</span>
+            </div>
+            <div class="terminal-account-stats">
+              <span>Cash ${formatMoney(balance.cashBalance)} USDT</span>
+              <span>uPnL ${formatMoney(balance.unrealized)} USDT</span>
+            </div>`
+      }
+    `;
+    if (!account.error) {
+      if (positions.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "terminal-position-row";
+        empty.textContent = "No open position for selected symbol";
+        card.appendChild(empty);
+      } else {
+        for (const position of positions) {
+          const row = document.createElement("div");
+          row.className = "terminal-position-row";
+          row.innerHTML = `
+            <span class="${position.side === "LONG" ? "positive" : "negative"}">${escapeHtml(position.side)} ${escapeHtml(position.symbol)}</span>
+            <span>vol ${formatNumber(position.holdVol)} @ ${formatNumber(position.holdAvgPrice || position.openAvgPrice || 0)} | ${Number(position.leverage || 0)}x</span>
+          `;
+          card.appendChild(row);
+        }
+      }
+    }
+    terminalAccountsEl.appendChild(card);
+  }
+}
+
+async function refreshTerminal() {
+  if (!terminalForm) {
+    return;
+  }
+  terminalStateEl.textContent = "Refreshing...";
+  try {
+    const symbol = terminalForm.elements.symbol.value || terminalDefaults.symbol;
+    const terminal = await api(`/api/terminal/status?symbol=${encodeURIComponent(symbol)}`);
+    updateTerminal(terminal);
+  } catch (error) {
+    terminalStateEl.textContent = "Error";
+    addLog({ level: "ERROR", message: error.message, timestamp: new Date().toISOString() });
+  }
+}
+
+async function submitTerminalOrder(action) {
+  setTerminalBusy(true);
+  try {
+    const data = await api("/api/terminal/order", "POST", collectTerminalConfig(action));
+    updateTerminal(data.terminal);
+    const failed = (data.result?.results || []).filter((item) => item.error);
+    addLog({
+      level: failed.length > 0 ? "ERROR" : "WARN",
+      message: `Terminal ${data.result?.dryRun ? "DRY-RUN " : ""}${action} ${data.result?.symbol}: ${
+        data.result?.results?.map((item) => `${item.accountName}${item.error ? " failed" : " ok"}`).join(" | ") || "done"
+      }`,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    addLog({ level: "ERROR", message: error.message, timestamp: new Date().toISOString() });
+  } finally {
+    setTerminalBusy(false);
+  }
+}
+
+function collectTerminalConfig(action) {
+  const dryRun = terminalForm.elements.dryRun.checked;
+  return {
+    action,
+    symbol: terminalForm.elements.symbol.value,
+    accountMode: terminalForm.elements.accountMode.value,
+    accountId: terminalForm.elements.accountId.value,
+    margin: Number(terminalForm.elements.margin.value),
+    leverage: Number(terminalForm.elements.leverage.value),
+    closeSide: terminalForm.elements.closeSide.value,
+    dryRun,
+    liveConfirmation: terminalForm.elements.liveConfirmation.value,
+    liveConfirmed: dryRun || terminalForm.elements.liveConfirmation.value === "YES LIVE",
+    accountMargins: readTerminalMargins()
+  };
+}
+
+function readTerminalMargins() {
+  const margins = {};
+  terminalMarginsEl.querySelectorAll(".terminal-margin-row").forEach((row) => {
+    const id = row.dataset.accountId;
+    const input = row.querySelector('[name="terminalAccountMargin"]');
+    if (id && input) {
+      margins[id] = Number(input.value);
+    }
+  });
+  return margins;
+}
+
+function currentTerminalAccounts() {
+  try {
+    return JSON.parse(terminalForm.dataset.accounts || "[]");
+  } catch {
+    return [];
+  }
+}
+
 function renderSpreadRows(rows, settings) {
   if (rows.length === 0) {
     spreadRowsEl.innerHTML = "";
@@ -796,6 +1020,14 @@ function setSpreadBusy(value) {
   document.querySelector("#startSpreadBtn").disabled = value;
 }
 
+function setTerminalBusy(value) {
+  document.querySelectorAll("[data-terminal-action]").forEach((button) => {
+    button.disabled = value;
+  });
+  document.querySelector("#refreshTerminalBtn").disabled = value;
+  terminalStateEl.textContent = value ? "Working..." : "Ready";
+}
+
 function pricePercentToUsdt(pricePercent, margin, leverage) {
   return Number(((margin * leverage * pricePercent) / 100).toFixed(4));
 }
@@ -816,6 +1048,11 @@ function formatNumber(value) {
     return numberValue.toFixed(4);
   }
   return numberValue.toFixed(8);
+}
+
+function formatMoney(value) {
+  const numberValue = Number(value || 0);
+  return numberValue.toFixed(2);
 }
 
 function formatCompact(value) {

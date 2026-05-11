@@ -8,7 +8,7 @@ import { formatConfigCard } from "../core/format";
 import { PositionManager } from "../core/position-manager";
 import { RiskManager } from "../core/risk-manager";
 import { TradingEngine } from "../core/trading-engine";
-import { MexcClient } from "../mexc/client";
+import { MexcAccountAsset, MexcClient, MexcOpenPosition } from "../mexc/client";
 import { ScannerEngine } from "../scanner/scanner-engine";
 import { ScannerConfig } from "../scanner/types";
 import { createStrategy, STRATEGY_FACTORIES } from "../strategies";
@@ -19,6 +19,7 @@ type SavedWebConfig = Omit<BotConfig, "strategyName" | "strategyParams"> & {
   masterAccountId?: string;
   scanner?: SavedScannerConfig;
   spreadChecker?: SavedSpreadCheckerConfig;
+  terminal?: SavedTerminalConfig;
   symbolHistory?: string[];
 };
 
@@ -70,6 +71,16 @@ interface SavedSpreadCheckerConfig {
   ntfyTopic?: string;
   ntfyToken?: string;
   emailToSmsAddress?: string;
+}
+
+interface SavedTerminalConfig {
+  symbol?: string;
+  accountMode?: "single" | "group";
+  accountId?: string;
+  margin?: number;
+  leverage?: number;
+  dryRun?: boolean;
+  accountMargins?: Record<string, number>;
 }
 
 interface SpreadCheckerConfig {
@@ -133,6 +144,20 @@ interface SpreadRuntimeStatus {
   lastUpdated?: string;
   dryRun: boolean;
   settings: SpreadCheckerConfig;
+}
+
+interface TerminalAccountStatus {
+  id: string;
+  name: string;
+  role: "master" | "slave";
+  balance?: MexcAccountAsset;
+  positions: MexcOpenPosition[];
+  error?: string;
+}
+
+interface TerminalOrderTarget {
+  account: SavedWebAccount;
+  margin: number;
 }
 
 interface SpreadAlertState {
@@ -315,6 +340,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
       running: runtimes.length > 0,
       scanner: currentScannerStatus(),
       spread: currentSpreadStatus(),
+      terminal: await currentTerminalStatus(),
       status: currentStatus()
     });
   }
@@ -358,6 +384,18 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   }
   if (url.pathname === "/api/spread-checker/status") {
     return sendJson(res, 200, currentSpreadStatus());
+  }
+  if (url.pathname === "/api/terminal/status") {
+    return sendJson(res, 200, await currentTerminalStatus(url.searchParams.get("symbol") ?? undefined));
+  }
+  if (url.pathname === "/api/terminal/order" && req.method === "POST") {
+    const body = await readJson(req);
+    const result = await executeTerminalOrder(body as Record<string, unknown>);
+    const requestedSymbol =
+      body && typeof body === "object" && typeof (body as Record<string, unknown>).symbol === "string"
+        ? String((body as Record<string, unknown>).symbol)
+        : undefined;
+    return sendJson(res, 200, { ok: true, result, terminal: await currentTerminalStatus(requestedSymbol) });
   }
   if (url.pathname === "/api/scanner/execute" && req.method === "POST") {
     const body = (await readJson(req)) as { alertId?: string };
@@ -711,6 +749,170 @@ async function stopBot(): Promise<void> {
   broadcast("status", currentStatus());
 }
 
+async function currentTerminalStatus(symbolInput?: string): Promise<{
+  accounts: TerminalAccountStatus[];
+  settings: Required<SavedTerminalConfig>;
+  totalEquity: number;
+  totalAvailable: number;
+  refreshedAt: string;
+}> {
+  const settings = buildTerminalSettings({ symbol: symbolInput });
+  const accounts = terminalAccounts();
+  const statuses = await Promise.all(
+    accounts.map(async (account): Promise<TerminalAccountStatus> => {
+      const logger = new Logger({ minLevel: "ERROR", prefix: `Terminal ${account.name}` });
+      const client = new MexcClient(account.authToken, true, logger);
+      try {
+        const [balance, positions] = await Promise.all([
+          client.getAccountAsset("USDT"),
+          client.getOpenPositionDetails(settings.symbol)
+        ]);
+        return {
+          id: account.id,
+          name: account.name,
+          role: account.role,
+          balance,
+          positions
+        };
+      } catch (error) {
+        return {
+          id: account.id,
+          name: account.name,
+          role: account.role,
+          positions: [],
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+    })
+  );
+  return {
+    accounts: statuses,
+    settings,
+    totalEquity: statuses.reduce((sum, account) => sum + (account.balance?.equity ?? 0), 0),
+    totalAvailable: statuses.reduce((sum, account) => sum + (account.balance?.availableBalance ?? 0), 0),
+    refreshedAt: new Date().toISOString()
+  };
+}
+
+async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
+  action: "BUY" | "SELL" | "CLOSE";
+  symbol: string;
+  dryRun: boolean;
+  results: Array<{
+    accountId: string;
+    accountName: string;
+    margin: number;
+    leverage: number;
+    volume?: number;
+    orderId?: string;
+    positionId?: string;
+    closedPositions?: number;
+    error?: string;
+  }>;
+}> {
+  const settings = buildTerminalSettings(input);
+  const action = stringOption(input.action, "BUY", ["BUY", "SELL", "CLOSE"]);
+  const dryRun = booleanValue(input.dryRun, settings.dryRun);
+  const liveConfirmed = Boolean(input.liveConfirmed) || String(input.liveConfirmation ?? "") === "YES LIVE";
+  if (!dryRun && !liveConfirmed) {
+    throw new Error("Live terminal orders require YES LIVE confirmation");
+  }
+  const targets = terminalOrderTargets(input, settings);
+  if (targets.length === 0) {
+    throw new Error("No terminal account targets selected");
+  }
+  saveTerminalSettings(settings);
+
+  const results = [];
+  for (const target of targets) {
+    const logger = new Logger({ minLevel: "INFO", prefix: `Terminal ${target.account.name}` });
+    const unsubscribe = logger.onLog((entry) => {
+      recentLogs.push(entry);
+      if (recentLogs.length > 300) {
+        recentLogs.shift();
+      }
+      broadcast("log", entry);
+    });
+    const client = new MexcClient(target.account.authToken, dryRun, logger);
+    try {
+      const price = await client.getTickerPrice(settings.symbol);
+      if (action === "CLOSE") {
+        const closeSide = stringOption(input.closeSide, "ALL", ["ALL", "LONG", "SHORT"]);
+        const positions = (await client.getOpenPositionDetails(settings.symbol)).filter(
+          (position) => closeSide === "ALL" || position.side === closeSide
+        );
+        if (positions.length === 0) {
+          throw new Error(`No open ${closeSide === "ALL" ? "" : `${closeSide} `}position on ${settings.symbol}`);
+        }
+        const closes = [];
+        for (const position of positions) {
+          const order = await client.closeMarketPosition({
+            symbol: position.symbol,
+            side: position.side,
+            price,
+            volume: position.holdVol,
+            leverage: position.leverage,
+            positionId: position.positionId
+          });
+          closes.push(order);
+        }
+        results.push({
+          accountId: target.account.id,
+          accountName: target.account.name,
+          margin: target.margin,
+          leverage: settings.leverage,
+          closedPositions: closes.length,
+          orderId: closes.at(-1)?.orderId,
+          positionId: closes.at(-1)?.positionId
+        });
+      } else {
+        const side = action === "BUY" ? "LONG" : "SHORT";
+        const volume = await client.calculateVolume(settings.symbol, target.margin, settings.leverage, price);
+        const order = await client.openMarketPosition({
+          symbol: settings.symbol,
+          side,
+          price,
+          volume,
+          leverage: settings.leverage
+        });
+        results.push({
+          accountId: target.account.id,
+          accountName: target.account.name,
+          margin: target.margin,
+          leverage: settings.leverage,
+          volume,
+          orderId: order.orderId,
+          positionId: order.positionId
+        });
+      }
+    } catch (error) {
+      results.push({
+        accountId: target.account.id,
+        accountName: target.account.name,
+        margin: target.margin,
+        leverage: settings.leverage,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  pushWebLog(
+    results.some((result) => result.error) ? "ERROR" : "WARN",
+    `Terminal ${dryRun ? "DRY-RUN " : ""}${action} ${settings.symbol}: ${results
+      .map((result) => `${result.accountName}${result.error ? ` failed=${result.error}` : " ok"}`)
+      .join(" | ")}`
+  );
+
+  return {
+    action,
+    symbol: settings.symbol,
+    dryRun,
+    results
+  };
+}
+
 function buildConfig(input: Record<string, unknown>): BotConfig {
   const symbol = normalizeSymbol(String(input.symbol ?? "BTC_USDT"));
   const strategyName = String(input.strategyName ?? "ManualConsoleStrategy");
@@ -814,6 +1016,94 @@ function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadChecker
     ntfyToken: stringValue(record.ntfyToken, saved?.ntfyToken ?? process.env.NTFY_TOKEN ?? ""),
     emailToSmsAddress: stringValue(record.emailToSmsAddress, saved?.emailToSmsAddress ?? process.env.EMAIL_TO_SMS_ADDRESS ?? "")
   };
+}
+
+function buildTerminalSettings(input: Record<string, unknown>): Required<SavedTerminalConfig> {
+  const saved = readSaved();
+  const terminal = saved?.terminal;
+  const inputSymbol = typeof input.symbol === "string" && input.symbol.trim() ? input.symbol : undefined;
+  const symbolValue = String(inputSymbol ?? terminal?.symbol ?? saved?.symbol ?? "BTC_USDT");
+  const accounts = terminalAccounts();
+  const defaultAccount = accounts.find((account) => account.role === "master") ?? accounts[0];
+  const symbol = normalizeSymbol(symbolValue || "BTC_USDT");
+  if (!/^[A-Z0-9]+_[A-Z0-9]+$/.test(symbol)) {
+    throw new Error("Terminal symbol must look like BTC_USDT");
+  }
+  return {
+    symbol,
+    accountMode: stringOption(input.accountMode, terminal?.accountMode ?? "single", ["single", "group"]),
+    accountId: String(input.accountId ?? terminal?.accountId ?? defaultAccount?.id ?? ""),
+    margin: positiveNumber(input.margin ?? terminal?.margin, 10),
+    leverage: Math.max(1, Math.min(200, positiveNumber(input.leverage ?? terminal?.leverage, 10))),
+    dryRun: booleanValue(input.dryRun, terminal?.dryRun ?? saved?.dryRun ?? true),
+    accountMargins: parseTerminalAccountMargins(input.accountMargins, terminal?.accountMargins)
+  };
+}
+
+function terminalAccounts(): SavedWebAccount[] {
+  const saved = readSaved();
+  const fallbackToken = String(saved?.authToken ?? process.env.MEXC_WEB_AUTH_TOKEN ?? "").trim();
+  try {
+    return buildAccounts(
+      {
+        accounts: saved?.accounts,
+        masterAccountId: saved?.masterAccountId
+      },
+      fallbackToken
+    );
+  } catch {
+    return [];
+  }
+}
+
+function terminalOrderTargets(input: Record<string, unknown>, settings: Required<SavedTerminalConfig>): TerminalOrderTarget[] {
+  const accounts = terminalAccounts();
+  const selected =
+    settings.accountMode === "group"
+      ? accounts
+      : accounts.filter((account) => account.id === settings.accountId || (!settings.accountId && account.role === "master"));
+  return selected.map((account) => ({
+    account,
+    margin: Math.max(0.1, settings.accountMargins[account.id] ?? settings.margin)
+  }));
+}
+
+function parseTerminalAccountMargins(input: unknown, saved: Record<string, number> | undefined): Record<string, number> {
+  const margins: Record<string, number> = { ...(saved ?? {}) };
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      if (typeof item !== "object" || item === null) {
+        continue;
+      }
+      const record = item as Record<string, unknown>;
+      const id = String(record.accountId ?? record.id ?? "").trim();
+      const margin = Number(record.margin);
+      if (id && Number.isFinite(margin) && margin > 0) {
+        margins[id] = margin;
+      }
+    }
+  } else if (typeof input === "object" && input !== null) {
+    for (const [id, value] of Object.entries(input as Record<string, unknown>)) {
+      const margin = Number(value);
+      if (id && Number.isFinite(margin) && margin > 0) {
+        margins[id] = margin;
+      }
+    }
+  }
+  return margins;
+}
+
+function saveTerminalSettings(settings: Required<SavedTerminalConfig>): void {
+  const previous = readSaved();
+  const next: SavedWebConfig = {
+    ...((previous ?? {}) as SavedWebConfig),
+    terminal: settings,
+    symbolHistory: Array.from(
+      new Set([settings.symbol, ...(previous?.symbolHistory ?? []), previous?.symbol].filter((symbol): symbol is string => Boolean(symbol)))
+    ).slice(0, 10)
+  };
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
 function buildAccounts(input: Record<string, unknown>, fallbackToken: string): SavedWebAccount[] {
@@ -1304,10 +1594,14 @@ async function postForm(url: string, body: URLSearchParams, headers: Record<stri
 
 function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
   const url = `https://www.mexc.com/futures/${encodeURIComponent(row.symbol)}`;
+  const tradeSide = mexcInternalTradeSide(row);
   if (config.alertLanguage === "en") {
     return [
       `🔴 MEXC Fair/Last spread on ${row.symbol} ${formatFixed(row.mexcSpreadPercent, 2)}%`,
       url,
+      "",
+      `✅ Open on MEXC: ${tradeSide}`,
+      tradeSide === "SHORT" ? "Last is above Fair, trade expects move down to Fair." : "Last is below Fair, trade expects move up to Fair.",
       "",
       "━━━━━━━━━━━━━━━━━━━━",
       "💰 Prices:",
@@ -1326,6 +1620,9 @@ function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): str
   return [
     `🔴 Разница цен на ${row.symbol} ${formatFixed(row.mexcSpreadPercent, 2)}%`,
     url,
+    "",
+    `✅ Открывать на MEXC: ${tradeSide}`,
+    tradeSide === "SHORT" ? "Last выше Fair, идея: шорт к возврату на Fair." : "Last ниже Fair, идея: лонг к возврату на Fair.",
     "",
     "━━━━━━━━━━━━━━━━━━━━",
     "💰 Цены:",
@@ -1358,6 +1655,8 @@ function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): st
       `📈📈 #${base} | Spread: ${formatFixed(row.crossSpreadPercent, 2)}%`,
       `📌 ${row.symbol} (COPY: ${base})`,
       "",
+      `✅ Open: LONG ${longExchange} / SHORT ${shortExchange}`,
+      "",
       `🟢 Long  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
       `🔴 Short ${shortExchange.padEnd(5)}: $${formatAlertPrice(shortPrice)}`,
       "",
@@ -1371,6 +1670,8 @@ function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): st
     `📈📈 #${base} | Спред: ${formatFixed(row.crossSpreadPercent, 2)}%`,
     `📌 ${row.symbol} (COPY: ${base})`,
     "",
+    `✅ Открывать: LONG ${longExchange} / SHORT ${shortExchange}`,
+    "",
     `🟢 Лонг  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
     `🔴 Шорт ${shortExchange.padEnd(5)}: $${formatAlertPrice(shortPrice)}`,
     "",
@@ -1379,6 +1680,10 @@ function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): st
     "",
     `⏰ ${formatUtc(row.updatedAt)} UTC`
   ].join("\n");
+}
+
+function mexcInternalTradeSide(row: SpreadRow): "LONG" | "SHORT" {
+  return row.mexcDirection === "MEXC_LAST_ABOVE_FAIR" ? "SHORT" : "LONG";
 }
 
 function pushWebLog(level: "INFO" | "WARN" | "ERROR", message: string): void {

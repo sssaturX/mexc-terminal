@@ -11,6 +11,33 @@ import { Logger } from "../core/logger";
 
 type UnknownRecord = Record<string, unknown>;
 
+export interface MexcAccountAsset {
+  currency: string;
+  availableBalance: number;
+  cashBalance: number;
+  equity: number;
+  frozenBalance: number;
+  positionMargin: number;
+  unrealized: number;
+}
+
+export interface MexcOpenPosition {
+  positionId?: string;
+  symbol: string;
+  side: PositionSide;
+  openType?: number;
+  state?: number;
+  holdVol: number;
+  frozenVol?: number;
+  holdAvgPrice?: number;
+  openAvgPrice?: number;
+  liquidatePrice?: number;
+  margin?: number;
+  leverage: number;
+  unrealized?: number;
+  raw: unknown;
+}
+
 export class MexcClient {
   private readonly client: MexcFuturesClient;
 
@@ -169,6 +196,68 @@ export class MexcClient {
     const rawVolume = (margin * leverage) / price;
     const detail = await this.getContractDetail(symbol);
     return roundVolume(rawVolume, detail);
+  }
+
+  async getAccountAsset(currency = "USDT"): Promise<MexcAccountAsset> {
+    try {
+      const response = await this.client.getAccountAsset(currency);
+      const data = unwrapData(response);
+      if (!isRecord(data)) {
+        throw new Error(`Account asset response does not contain ${currency} balance`);
+      }
+      return {
+        currency: pickString(data, ["currency"]) ?? currency,
+        availableBalance: pickNumber(data, ["availableBalance"]) ?? 0,
+        cashBalance: pickNumber(data, ["cashBalance"]) ?? 0,
+        equity: pickNumber(data, ["equity"]) ?? 0,
+        frozenBalance: pickNumber(data, ["frozenBalance"]) ?? 0,
+        positionMargin: pickNumber(data, ["positionMargin"]) ?? 0,
+        unrealized: pickNumber(data, ["unrealized"]) ?? 0
+      };
+    } catch (error) {
+      this.logSdkError(error);
+      throw error;
+    }
+  }
+
+  async getOpenPositionDetails(symbol?: string): Promise<MexcOpenPosition[]> {
+    try {
+      const response = await this.client.getOpenPositions(symbol);
+      const data = unwrapData(response);
+      if (!Array.isArray(data)) {
+        return [];
+      }
+      return data
+        .filter(isRecord)
+        .map((position): MexcOpenPosition | undefined => {
+          const positionSymbol = pickString(position, ["symbol"]);
+          const positionType = pickNumber(position, ["positionType", "type"]);
+          const holdVol = pickNumber(position, ["holdVol", "vol", "volume"]) ?? 0;
+          if (!positionSymbol || holdVol <= 0 || (positionType !== 1 && positionType !== 2)) {
+            return undefined;
+          }
+          return {
+            positionId: pickString(position, ["positionId", "id"]),
+            symbol: positionSymbol,
+            side: positionType === 1 ? "LONG" : "SHORT",
+            openType: pickNumber(position, ["openType"]),
+            state: pickNumber(position, ["state"]),
+            holdVol,
+            frozenVol: pickNumber(position, ["frozenVol"]),
+            holdAvgPrice: pickNumber(position, ["holdAvgPrice"]),
+            openAvgPrice: pickNumber(position, ["openAvgPrice"]),
+            liquidatePrice: pickNumber(position, ["liquidatePrice"]),
+            margin: pickNumber(position, ["im", "margin", "positionMargin"]),
+            leverage: pickNumber(position, ["leverage"]) ?? 1,
+            unrealized: pickNumber(position, ["unrealized", "unrealizedPnl"]),
+            raw: position
+          };
+        })
+        .filter((position): position is MexcOpenPosition => position !== undefined);
+    } catch (error) {
+      this.logSdkError(error);
+      throw error;
+    }
   }
 
   async openMarketPosition(input: {

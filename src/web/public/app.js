@@ -393,11 +393,11 @@ function matchSymbols(query) {
     const base = symbol.replace(/_USDT$/, "");
     if (symbol.startsWith(normalized) || base.startsWith(baseQuery)) {
       starts.push(symbol);
-    } else if (symbol.includes(normalized) || base.includes(baseQuery)) {
+    } else if (baseQuery.length >= 3 && (symbol.includes(normalized) || base.includes(baseQuery))) {
       includes.push(symbol);
     }
   }
-  return [...starts, ...includes].slice(0, 14);
+  return [...starts, ...includes].slice(0, 50);
 }
 
 function currentSymbolToken(input, multi) {

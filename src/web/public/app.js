@@ -17,12 +17,14 @@ const scannerAlertsEl = document.querySelector("#scannerAlerts");
 const scannerStateEl = document.querySelector("#scannerState");
 const spreadRowsEl = document.querySelector("#spreadRows");
 const spreadAlertsEl = document.querySelector("#spreadAlerts");
+const spreadCallStatsEl = document.querySelector("#spreadCallStats");
 const spreadStateEl = document.querySelector("#spreadState");
 const spreadUpdatedEl = document.querySelector("#spreadUpdated");
 let strategies = [];
 let symbolSuggestions = [];
 let eventsBound = false;
 let eventsConnected = false;
+let initialRouteApplied = false;
 let accountCounter = 0;
 
 const defaults = {
@@ -104,6 +106,7 @@ async function boot() {
   updateScanner(data.scanner);
   updateSpread(data.spread);
   updateTerminal(data.terminal);
+  applyInitialRoute();
 }
 
 function fillStrategies() {
@@ -304,6 +307,27 @@ function activateTab(tabId) {
   });
   if (tabId === "terminalTab") {
     void refreshTerminal();
+  }
+}
+
+function applyInitialRoute() {
+  if (initialRouteApplied) {
+    return;
+  }
+  initialRouteApplied = true;
+  const params = new URLSearchParams(window.location.search);
+  const tab = params.get("tab");
+  const symbol = params.get("symbol");
+  const action = params.get("action");
+  if (tab === "terminal") {
+    activateTab("terminalTab");
+  }
+  if (symbol && terminalForm) {
+    terminalForm.elements.symbol.value = normalizeSymbol(symbol);
+    void refreshTerminal();
+  }
+  if ((action === "BUY" || action === "SELL") && terminalStateEl) {
+    terminalStateEl.textContent = action === "BUY" ? "Link prepared: Open LONG" : "Link prepared: Open SHORT";
   }
 }
 
@@ -763,6 +787,7 @@ function updateSpread(spread) {
     : "No data";
   renderSpreadRows(spread.rows || [], spread.settings || {});
   renderSpreadAlerts(spread.alerts || []);
+  renderSpreadCallStats(spread.callStats, spread.activeCalls || []);
 }
 
 function updateTerminal(terminal) {
@@ -1028,6 +1053,42 @@ function renderSpreadAlerts(alerts) {
   }
 }
 
+function renderSpreadCallStats(stats = {}, activeCalls = []) {
+  if (!spreadCallStatsEl) {
+    return;
+  }
+  spreadCallStatsEl.innerHTML = "";
+  const item = document.createElement("div");
+  item.className = "scanner-item";
+  item.innerHTML = `
+    <div class="scanner-item-head">
+      <strong>${Number(stats.converged || 0)}/${Number(stats.totalStarted || 0)} converged</strong>
+      <span class="grade">${Number(stats.active || 0)} active</span>
+    </div>
+    <div class="scanner-item-stats">
+      <span>Avg ${formatDuration(stats.avgConvergenceMs)}</span>
+      <span>ETA ${formatDuration(stats.estimatedConvergenceMs)}</span>
+    </div>
+  `;
+  spreadCallStatsEl.appendChild(item);
+
+  for (const call of activeCalls.slice(0, 8)) {
+    const row = document.createElement("div");
+    row.className = "scanner-item";
+    row.innerHTML = `
+      <div class="scanner-item-head">
+        <strong>${escapeHtml(call.symbol)} ${escapeHtml(call.type)}</strong>
+        <span class="grade">${escapeHtml(call.tradePlan || "")}</span>
+      </div>
+      <div class="scanner-item-stats">
+        <span>${Number(call.initialSpreadPercent || 0).toFixed(4)}% -> ${Number(call.lastSpreadPercent || 0).toFixed(4)}%</span>
+        <span>target ${Number(call.targetSpreadPercent || 0).toFixed(4)}%</span>
+      </div>
+    `;
+    spreadCallStatsEl.appendChild(row);
+  }
+}
+
 function renderScannerTop(items) {
   scannerTopEl.innerHTML = "";
   if (items.length === 0) {
@@ -1182,6 +1243,28 @@ function formatNumber(value) {
 function formatMoney(value) {
   const numberValue = Number(value || 0);
   return numberValue.toFixed(2);
+}
+
+function formatDuration(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) {
+    return "-";
+  }
+  const totalSeconds = Math.round(value / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function normalizeSymbol(symbol) {
+  return String(symbol || "").trim().toUpperCase();
 }
 
 function formatCompact(value) {

@@ -136,11 +136,42 @@ interface SpreadAlert {
   error?: string;
 }
 
+type SpreadCallType = "MEXC_INTERNAL" | "CROSS_EXCHANGE";
+
+interface ActiveSpreadCall {
+  id: string;
+  symbol: string;
+  type: SpreadCallType;
+  openedAt: number;
+  initialSpreadPercent: number;
+  lastSpreadPercent: number;
+  bestSpreadPercent: number;
+  thresholdPercent: number;
+  targetSpreadPercent: number;
+  tradePlan: string;
+}
+
+interface CompletedSpreadCall extends ActiveSpreadCall {
+  closedAt: number;
+  convergenceMs: number;
+}
+
+interface SpreadCallStats {
+  totalStarted: number;
+  active: number;
+  converged: number;
+  avgConvergenceMs?: number;
+  medianConvergenceMs?: number;
+  estimatedConvergenceMs?: number;
+}
+
 interface SpreadRuntimeStatus {
   running: boolean;
   rows: SpreadRow[];
   totalRows: number;
   alerts: SpreadAlert[];
+  callStats: SpreadCallStats;
+  activeCalls: ActiveSpreadCall[];
   lastUpdated?: string;
   dryRun: boolean;
   settings: SpreadCheckerConfig;
@@ -211,6 +242,8 @@ const GATE_API_BASE_URL = "https://api.gateio.ws/api/v4";
 const CROSS_INDEX_COMPATIBILITY_MAX_PERCENT = 5;
 const CROSS_LAST_PRICE_SANITY_MAX_PERCENT = 20;
 const SPREAD_DISPLAY_LINGER_MS = 3 * 60 * 1000;
+const MAX_COMPLETED_SPREAD_CALLS = 500;
+const PUBLIC_WEB_BASE_URL = (process.env.WEB_PUBLIC_BASE_URL ?? "https://mexc.moontap.space").replace(/\/$/, "");
 const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
   marketScope: "all",
   symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT"],
@@ -310,6 +343,8 @@ let spreadAlerts: SpreadAlert[] = [];
 const spreadAlertStates = new Map<string, SpreadAlertState>();
 const spreadVisibleRows = new Map<string, number>();
 const spreadDisplayOrder = new Map<string, number>();
+const activeSpreadCalls = new Map<string, ActiveSpreadCall>();
+const completedSpreadCalls: CompletedSpreadCall[] = [];
 let spreadDisplayFilterKey = "";
 let spreadDisplayOrderCounter = 0;
 const clients = new Set<ServerResponse>();
@@ -473,6 +508,7 @@ async function startSpreadChecker(config: SpreadCheckerConfig): Promise<void> {
   spreadRows = [];
   spreadAlerts = [];
   spreadAlertStates.clear();
+  activeSpreadCalls.clear();
   spreadVisibleRows.clear();
   spreadDisplayOrder.clear();
   spreadDisplayFilterKey = "";
@@ -563,8 +599,10 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
         updatedAt
       };
       rows.push(row);
+      updateSpreadCallTracking(row, "MEXC_INTERNAL");
       await processSpreadThreshold(config, row, "MEXC_INTERNAL");
       if (hasGate) {
+        updateSpreadCallTracking(row, "CROSS_EXCHANGE");
         await processSpreadThreshold(config, row, "CROSS_EXCHANGE");
       }
     }
@@ -616,8 +654,10 @@ async function fetchCustomSpreadRows(config: SpreadCheckerConfig, updatedAt: str
         updatedAt
       };
       rows.push(row);
+      updateSpreadCallTracking(row, "MEXC_INTERNAL");
       await processSpreadThreshold(config, row, "MEXC_INTERNAL");
       if (hasGate) {
+        updateSpreadCallTracking(row, "CROSS_EXCHANGE");
         await processSpreadThreshold(config, row, "CROSS_EXCHANGE");
       }
     } catch (error) {
@@ -663,7 +703,10 @@ async function processSpreadThreshold(
   state.lastAlertAt = now;
   spreadAlertStates.set(stateKey, state);
 
-  const message = type === "MEXC_INTERNAL" ? formatMexcSpreadAlert(config, row) : formatCrossSpreadAlert(config, row);
+  const call = ensureSpreadCall(row, type, threshold, spreadPercent);
+  const messageContext = { call, stats: spreadCallStats(row.symbol, type) };
+  const message =
+    type === "MEXC_INTERNAL" ? formatMexcSpreadAlert(config, row, messageContext) : formatCrossSpreadAlert(config, row, messageContext);
   const alert: SpreadAlert = {
     id: `${now}-${row.symbol}-${type}`,
     symbol: row.symbol,
@@ -680,6 +723,104 @@ async function processSpreadThreshold(
   }
   spreadAlerts = [alert, ...spreadAlerts].slice(0, 50);
   pushWebLog(alert.error ? "ERROR" : "WARN", alert.error ? `Spread alert failed: ${alert.error}` : message.replace(/\n/g, " | "));
+}
+
+function updateSpreadCallTracking(row: SpreadRow, type: SpreadCallType): void {
+  const spreadPercent = type === "MEXC_INTERNAL" ? row.mexcSpreadPercent : row.crossSpreadPercent;
+  if (spreadPercent === undefined) {
+    return;
+  }
+  const key = spreadCallKey(row.symbol, type);
+  const call = activeSpreadCalls.get(key);
+  if (!call) {
+    return;
+  }
+  call.lastSpreadPercent = spreadPercent;
+  call.bestSpreadPercent = Math.min(call.bestSpreadPercent, spreadPercent);
+  if (spreadPercent <= call.targetSpreadPercent) {
+    const closedAt = Date.now();
+    completedSpreadCalls.unshift({
+      ...call,
+      closedAt,
+      convergenceMs: closedAt - call.openedAt
+    });
+    if (completedSpreadCalls.length > MAX_COMPLETED_SPREAD_CALLS) {
+      completedSpreadCalls.pop();
+    }
+    activeSpreadCalls.delete(key);
+    pushWebLog(
+      "INFO",
+      `Spread call converged: ${row.symbol} ${type} ${call.initialSpreadPercent.toFixed(4)}% -> ${spreadPercent.toFixed(
+        4
+      )}% in ${formatDuration(closedAt - call.openedAt)}`
+    );
+  }
+}
+
+function ensureSpreadCall(row: SpreadRow, type: SpreadCallType, thresholdPercent: number, spreadPercent: number): ActiveSpreadCall {
+  const key = spreadCallKey(row.symbol, type);
+  const existing = activeSpreadCalls.get(key);
+  if (existing) {
+    return existing;
+  }
+  const now = Date.now();
+  const call: ActiveSpreadCall = {
+    id: `${now}-${row.symbol}-${type}`,
+    symbol: row.symbol,
+    type,
+    openedAt: now,
+    initialSpreadPercent: spreadPercent,
+    lastSpreadPercent: spreadPercent,
+    bestSpreadPercent: spreadPercent,
+    thresholdPercent,
+    targetSpreadPercent: convergenceTargetPercent(thresholdPercent, spreadPercent),
+    tradePlan: spreadTradePlan(row, type)
+  };
+  activeSpreadCalls.set(key, call);
+  return call;
+}
+
+function spreadCallKey(symbol: string, type: SpreadCallType): string {
+  return `${symbol}:${type}`;
+}
+
+function convergenceTargetPercent(thresholdPercent: number, initialSpreadPercent: number): number {
+  return Math.max(thresholdPercent * 0.5, initialSpreadPercent * 0.25, 0.001);
+}
+
+function spreadCallStats(symbol?: string, type?: SpreadCallType): SpreadCallStats {
+  const matchingCompleted = completedSpreadCalls.filter(
+    (call) => (symbol === undefined || call.symbol === symbol) && (type === undefined || call.type === type)
+  );
+  const matchingActive = Array.from(activeSpreadCalls.values()).filter(
+    (call) => (symbol === undefined || call.symbol === symbol) && (type === undefined || call.type === type)
+  );
+  const durations = matchingCompleted.map((call) => call.convergenceMs).sort((left, right) => left - right);
+  const avgConvergenceMs =
+    durations.length === 0 ? undefined : durations.reduce((sum, duration) => sum + duration, 0) / durations.length;
+  const medianConvergenceMs =
+    durations.length === 0 ? undefined : durations[Math.floor((durations.length - 1) / 2)];
+  return {
+    totalStarted: matchingCompleted.length + matchingActive.length,
+    active: matchingActive.length,
+    converged: matchingCompleted.length,
+    avgConvergenceMs,
+    medianConvergenceMs,
+    estimatedConvergenceMs: estimatedConvergenceMs(symbol, type)
+  };
+}
+
+function estimatedConvergenceMs(symbol?: string, type?: SpreadCallType): number | undefined {
+  const scopes = [
+    completedSpreadCalls.filter((call) => call.symbol === symbol && call.type === type),
+    completedSpreadCalls.filter((call) => call.type === type),
+    completedSpreadCalls
+  ];
+  const sample = scopes.find((items) => items.length >= 3);
+  if (!sample) {
+    return undefined;
+  }
+  return sample.reduce((sum, call) => sum + call.convergenceMs, 0) / sample.length;
 }
 
 async function startBot(input: Record<string, unknown>): Promise<void> {
@@ -1284,6 +1425,8 @@ function currentSpreadStatus(config = activeSpreadConfig ?? buildSpreadCheckerCo
     rows: visibleRows,
     totalRows: spreadRows.length,
     alerts: spreadAlerts,
+    callStats: spreadCallStats(),
+    activeCalls: Array.from(activeSpreadCalls.values()),
     lastUpdated: spreadRows[0]?.updatedAt,
     dryRun: config.dryRun,
     settings: config
@@ -1607,16 +1750,24 @@ async function postForm(url: string, body: URLSearchParams, headers: Record<stri
   }
 }
 
-function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
+function formatMexcSpreadAlert(
+  config: SpreadCheckerConfig,
+  row: SpreadRow,
+  context?: { call: ActiveSpreadCall; stats: SpreadCallStats }
+): string {
   const url = `https://www.mexc.com/futures/${encodeURIComponent(row.symbol)}`;
   const tradeSide = mexcInternalTradeSide(row);
+  const terminalUrl = terminalTradeUrl(row.symbol, tradeSide);
+  const statLines = formatSpreadCallStatLines(config, context);
   if (config.alertLanguage === "en") {
     return [
       `🔴 MEXC Fair/Last spread on ${row.symbol} ${formatFixed(row.mexcSpreadPercent, 2)}%`,
       url,
+      `Terminal: ${terminalUrl}`,
       "",
       `✅ Open on MEXC: ${tradeSide}`,
       tradeSide === "SHORT" ? "Last is above Fair, trade expects move down to Fair." : "Last is below Fair, trade expects move up to Fair.",
+      ...statLines,
       "",
       "━━━━━━━━━━━━━━━━━━━━",
       "💰 Prices:",
@@ -1635,9 +1786,11 @@ function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): str
   return [
     `🔴 Разница цен на ${row.symbol} ${formatFixed(row.mexcSpreadPercent, 2)}%`,
     url,
+    `Терминал: ${terminalUrl}`,
     "",
     `✅ Открывать на MEXC: ${tradeSide}`,
     tradeSide === "SHORT" ? "Last выше Fair, идея: шорт к возврату на Fair." : "Last ниже Fair, идея: лонг к возврату на Fair.",
+    ...statLines,
     "",
     "━━━━━━━━━━━━━━━━━━━━",
     "💰 Цены:",
@@ -1654,7 +1807,11 @@ function formatMexcSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): str
   ].join("\n");
 }
 
-function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): string {
+function formatCrossSpreadAlert(
+  config: SpreadCheckerConfig,
+  row: SpreadRow,
+  context?: { call: ActiveSpreadCall; stats: SpreadCallStats }
+): string {
   const base = row.symbol.replace(/_USDT$/, "");
   const mexcLast = row.mexcLast ?? 0;
   const gateLast = row.gateLast ?? 0;
@@ -1664,13 +1821,18 @@ function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): st
   const shortPrice = gateLast < mexcLast ? mexcLast : gateLast;
   const fundingMexc = formatFunding(row.mexcFundingRate);
   const fundingGate = formatFunding(row.gateFundingRate);
+  const mexcSide = longExchange === "MEXC" ? "LONG" : "SHORT";
+  const terminalUrl = terminalTradeUrl(row.symbol, mexcSide);
+  const statLines = formatSpreadCallStatLines(config, context);
 
   if (config.alertLanguage === "en") {
     return [
       `📈📈 #${base} | Spread: ${formatFixed(row.crossSpreadPercent, 2)}%`,
       `📌 ${row.symbol} (COPY: ${base})`,
+      `Terminal MEXC ${mexcSide}: ${terminalUrl}`,
       "",
       `✅ Open: LONG ${longExchange} / SHORT ${shortExchange}`,
+      ...statLines,
       "",
       `🟢 Long  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
       `🔴 Short ${shortExchange.padEnd(5)}: $${formatAlertPrice(shortPrice)}`,
@@ -1684,8 +1846,10 @@ function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): st
   return [
     `📈📈 #${base} | Спред: ${formatFixed(row.crossSpreadPercent, 2)}%`,
     `📌 ${row.symbol} (COPY: ${base})`,
+    `Терминал MEXC ${mexcSide}: ${terminalUrl}`,
     "",
     `✅ Открывать: LONG ${longExchange} / SHORT ${shortExchange}`,
+    ...statLines,
     "",
     `🟢 Лонг  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
     `🔴 Шорт ${shortExchange.padEnd(5)}: $${formatAlertPrice(shortPrice)}`,
@@ -1699,6 +1863,45 @@ function formatCrossSpreadAlert(config: SpreadCheckerConfig, row: SpreadRow): st
 
 function mexcInternalTradeSide(row: SpreadRow): "LONG" | "SHORT" {
   return row.mexcDirection === "MEXC_LAST_ABOVE_FAIR" ? "SHORT" : "LONG";
+}
+
+function spreadTradePlan(row: SpreadRow, type: SpreadCallType): string {
+  if (type === "MEXC_INTERNAL") {
+    return `MEXC ${mexcInternalTradeSide(row)}`;
+  }
+  const mexcLast = row.mexcLast ?? 0;
+  const gateLast = row.gateLast ?? 0;
+  const longExchange = gateLast < mexcLast ? "GATE" : "MEXC";
+  const shortExchange = gateLast < mexcLast ? "MEXC" : "GATE";
+  return `LONG ${longExchange} / SHORT ${shortExchange}`;
+}
+
+function terminalTradeUrl(symbol: string, side: "LONG" | "SHORT"): string {
+  const action = side === "LONG" ? "BUY" : "SELL";
+  return `${PUBLIC_WEB_BASE_URL}/?tab=terminal&symbol=${encodeURIComponent(symbol)}&side=${side}&action=${action}`;
+}
+
+function formatSpreadCallStatLines(config: SpreadCheckerConfig, context?: { call: ActiveSpreadCall; stats: SpreadCallStats }): string[] {
+  if (!context) {
+    return [];
+  }
+  const estimated = context.stats.estimatedConvergenceMs;
+  if (config.alertLanguage === "en") {
+    return [
+      "",
+      `📊 Calls: ${context.stats.converged}/${context.stats.totalStarted} converged, active ${context.stats.active}`,
+      `🎯 Converged at <= ${formatFixed(context.call.targetSpreadPercent, 4)}% | ETA: ${
+        estimated === undefined ? "collecting history" : `~${formatDuration(estimated)}`
+      }`
+    ];
+  }
+  return [
+    "",
+    `📊 Стата calls: ${context.stats.converged}/${context.stats.totalStarted} сходилось, активных ${context.stats.active}`,
+    `🎯 Схождение <= ${formatFixed(context.call.targetSpreadPercent, 4)}% | ETA: ${
+      estimated === undefined ? "собираем историю" : `~${formatDuration(estimated)}`
+    }`
+  ];
 }
 
 function pushWebLog(level: "INFO" | "WARN" | "ERROR", message: string): void {
@@ -1863,6 +2066,20 @@ function formatAlertPrice(value: number | undefined): string {
 
 function formatMoney(value: number): string {
   return value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
 }
 
 function formatFunding(value: number | undefined): string {

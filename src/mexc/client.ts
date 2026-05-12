@@ -233,14 +233,15 @@ export class MexcClient {
         .map((position): MexcOpenPosition | undefined => {
           const positionSymbol = pickString(position, ["symbol"]);
           const positionType = pickNumber(position, ["positionType", "type"]);
+          const side = pickPositionSide(position, positionType);
           const holdVol = pickNumber(position, ["holdVol", "vol", "volume"]) ?? 0;
-          if (!positionSymbol || holdVol <= 0 || (positionType !== 1 && positionType !== 2)) {
+          if (!positionSymbol || holdVol <= 0 || !side) {
             return undefined;
           }
           return {
             positionId: pickString(position, ["positionId", "id"]),
             symbol: positionSymbol,
-            side: positionType === 1 ? "LONG" : "SHORT",
+            side,
             openType: pickNumber(position, ["openType"]),
             state: pickNumber(position, ["state"]),
             holdVol,
@@ -289,27 +290,17 @@ export class MexcClient {
     return this.submitOrder(order, `DRY-OPEN-${Date.now()}`);
   }
 
-  async hasOpenPosition(symbol: string): Promise<boolean | undefined> {
+  async hasOpenPosition(symbol: string, side?: PositionSide): Promise<boolean | undefined> {
     if (this.dryRun) {
       return undefined;
     }
 
     try {
-      const response = await this.client.getOpenPositions(symbol);
-      const data = unwrapData(response);
-      if (!Array.isArray(data)) {
-        return undefined;
-      }
-      return data.some((position) => {
-        if (!isRecord(position)) {
-          return false;
-        }
-        const holdVol = pickNumber(position, ["holdVol", "vol", "volume"]);
-        const state = pickNumber(position, ["state"]);
-        return (holdVol ?? 0) > 0 && state !== 3;
+      const positions = await this.getOpenPositionDetails(symbol);
+      return positions.some((position) => {
+        return position.symbol === symbol && (side === undefined || position.side === side) && position.state !== 3;
       });
-    } catch (error) {
-      this.logSdkError(error);
+    } catch {
       return undefined;
     }
   }
@@ -514,6 +505,30 @@ function pickString(record: unknown, keys: string[]): string | undefined {
       return String(value);
     }
   }
+  return undefined;
+}
+
+function pickPositionSide(record: unknown, positionType?: number): PositionSide | undefined {
+  if (positionType === 1) {
+    return "LONG";
+  }
+  if (positionType === 2) {
+    return "SHORT";
+  }
+
+  const rawSide = pickString(record, ["positionSide", "holdSide", "side"]);
+  if (!rawSide) {
+    return undefined;
+  }
+
+  const normalized = rawSide.trim().toLowerCase();
+  if (normalized === "long" || normalized === "buy" || normalized === "1") {
+    return "LONG";
+  }
+  if (normalized === "short" || normalized === "sell" || normalized === "2") {
+    return "SHORT";
+  }
+
   return undefined;
 }
 

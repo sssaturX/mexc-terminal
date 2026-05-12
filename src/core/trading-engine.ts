@@ -10,6 +10,8 @@ import { ManualControls } from "./manual-controls";
 const MAX_TICKS = 2000;
 const MAX_CANDLES = 500;
 const CANDLE_MS = 60_000;
+const EXCHANGE_POSITION_SYNC_GRACE_MS = 10_000;
+const EXCHANGE_POSITION_MISS_LIMIT = 3;
 
 interface TradingEngineOptions {
   enableKeyboardControls?: boolean;
@@ -22,6 +24,8 @@ export class TradingEngine {
   private currentCandle?: Candle;
   private running = false;
   private previousPrice?: number;
+  private exchangePositionMisses = 0;
+  private exchangePositionGraceNoticeOpenedAt?: number;
   private readonly manualControls: ManualControls;
 
   constructor(
@@ -227,6 +231,8 @@ export class TradingEngine {
       volume,
       positionId: order.positionId
     });
+    this.exchangePositionMisses = 0;
+    this.exchangePositionGraceNoticeOpenedAt = undefined;
     this.risk.registerOpen();
     this.logger.info(
       formatOpenCard({
@@ -264,15 +270,43 @@ export class TradingEngine {
       return;
     }
 
-    const hasOpenPosition = await this.mexc.hasOpenPosition(position.symbol);
-    if (hasOpenPosition === false) {
-      this.logger.warn("Exchange position is no longer open; syncing local state as exchange-side SL/TP close");
-      const exitPrice = this.estimateExchangeExitPrice(position, price);
-      const exit = this.positions.close(exitPrice, "EXCHANGE_SYNC_CLOSE");
-      if (exit) {
-        this.risk.registerClose(exit.trade);
-        this.logger.info(formatCloseCard(exit.trade));
+    const hasOpenPosition = await this.mexc.hasOpenPosition(position.symbol, position.side);
+    if (hasOpenPosition === true) {
+      this.exchangePositionMisses = 0;
+      return;
+    }
+
+    if (hasOpenPosition !== false) {
+      return;
+    }
+
+    const positionAgeMs = Date.now() - position.openedAt;
+    if (positionAgeMs < EXCHANGE_POSITION_SYNC_GRACE_MS) {
+      this.exchangePositionMisses = 0;
+      if (this.exchangePositionGraceNoticeOpenedAt !== position.openedAt) {
+        this.exchangePositionGraceNoticeOpenedAt = position.openedAt;
+        this.logger.debug(
+          `Exchange position not visible yet; waiting ${EXCHANGE_POSITION_SYNC_GRACE_MS}ms before sync-close checks`
+        );
       }
+      return;
+    }
+
+    this.exchangePositionMisses += 1;
+    if (this.exchangePositionMisses < EXCHANGE_POSITION_MISS_LIMIT) {
+      this.logger.warn(
+        `Exchange position check missed ${this.exchangePositionMisses}/${EXCHANGE_POSITION_MISS_LIMIT}; waiting for confirmation before local close`
+      );
+      return;
+    }
+
+    this.exchangePositionMisses = 0;
+    this.logger.warn("Exchange position is no longer open; syncing local state as exchange-side SL/TP close");
+    const exitPrice = this.estimateExchangeExitPrice(position, price);
+    const exit = this.positions.close(exitPrice, "EXCHANGE_SYNC_CLOSE");
+    if (exit) {
+      this.risk.registerClose(exit.trade);
+      this.logger.info(formatCloseCard(exit.trade));
     }
   }
 
@@ -312,6 +346,8 @@ export class TradingEngine {
 
     const exit = this.positions.close(price, reason) ?? projected;
     if (exit) {
+      this.exchangePositionMisses = 0;
+      this.exchangePositionGraceNoticeOpenedAt = undefined;
       this.risk.registerClose(exit.trade);
       const pnl = exit.trade.pnl >= 0 ? `+${exit.trade.pnl.toFixed(4)}` : exit.trade.pnl.toFixed(4);
       this.logger.info(`Closing ${position.side} reason=${reason} price=${price} pnl=${pnl} USDT`);

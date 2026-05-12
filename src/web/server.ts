@@ -304,6 +304,7 @@ let scanner: ScannerEngine | undefined;
 let unsubscribeScannerLogs: (() => void) | undefined;
 let spreadCheckerTimer: NodeJS.Timeout | undefined;
 let spreadCheckerRunning = false;
+let activeSpreadConfig: SpreadCheckerConfig | undefined;
 let spreadRows: SpreadRow[] = [];
 let spreadAlerts: SpreadAlert[] = [];
 const spreadAlertStates = new Map<string, SpreadAlertState>();
@@ -370,8 +371,12 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson(req);
     const config = buildSpreadCheckerConfig(body as Record<string, unknown>);
     saveSpreadCheckerConfig(config);
-    broadcast("spread", currentSpreadStatus(config));
-    return sendJson(res, 200, { ok: true, spread: currentSpreadStatus(config) });
+    if (spreadCheckerRunning) {
+      activeSpreadConfig = config;
+      restartSpreadCheckerTimer(config);
+    }
+    broadcast("spread", currentSpreadStatus());
+    return sendJson(res, 200, { ok: true, spread: currentSpreadStatus() });
   }
   if (url.pathname === "/api/spread-checker/start" && req.method === "POST") {
     const body = await readJson(req);
@@ -463,6 +468,7 @@ async function stopScanner(): Promise<void> {
 async function startSpreadChecker(config: SpreadCheckerConfig): Promise<void> {
   stopSpreadChecker();
   saveSpreadCheckerConfig(config);
+  activeSpreadConfig = config;
   spreadCheckerRunning = true;
   spreadRows = [];
   spreadAlerts = [];
@@ -472,11 +478,8 @@ async function startSpreadChecker(config: SpreadCheckerConfig): Promise<void> {
   spreadDisplayFilterKey = "";
   spreadDisplayOrderCounter = 0;
   await runSpreadCheckerCycle(config);
-  spreadCheckerTimer = setInterval(() => {
-    void runSpreadCheckerCycle(config);
-  }, config.checkIntervalSec * 1000);
-  spreadCheckerTimer.unref();
-  broadcast("spread", currentSpreadStatus(config));
+  restartSpreadCheckerTimer(config);
+  broadcast("spread", currentSpreadStatus());
 }
 
 function stopSpreadChecker(): void {
@@ -485,7 +488,18 @@ function stopSpreadChecker(): void {
     spreadCheckerTimer = undefined;
   }
   spreadCheckerRunning = false;
+  activeSpreadConfig = undefined;
   broadcast("spread", currentSpreadStatus());
+}
+
+function restartSpreadCheckerTimer(config: SpreadCheckerConfig): void {
+  if (spreadCheckerTimer) {
+    clearInterval(spreadCheckerTimer);
+  }
+  spreadCheckerTimer = setInterval(() => {
+    void runSpreadCheckerCycle(activeSpreadConfig ?? config);
+  }, config.checkIntervalSec * 1000);
+  spreadCheckerTimer.unref();
 }
 
 async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void> {
@@ -991,12 +1005,12 @@ function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadChecker
   return {
     marketScope,
     symbols: (symbols.length > 0 ? symbols : DEFAULT_SPREAD_CONFIG.symbols).slice(0, 50),
-    displayMinSpreadPercent: Math.max(
-      0,
-      positiveNumber(record.displayMinSpreadPercent ?? saved?.displayMinSpreadPercent, DEFAULT_SPREAD_CONFIG.displayMinSpreadPercent)
+    displayMinSpreadPercent: nonNegativeNumber(
+      record.displayMinSpreadPercent ?? saved?.displayMinSpreadPercent,
+      DEFAULT_SPREAD_CONFIG.displayMinSpreadPercent
     ),
-    mexcThresholdPercent: positiveNumber(record.mexcThresholdPercent ?? saved?.mexcThresholdPercent, DEFAULT_SPREAD_CONFIG.mexcThresholdPercent),
-    crossExchangeThresholdPercent: positiveNumber(
+    mexcThresholdPercent: nonNegativeNumber(record.mexcThresholdPercent ?? saved?.mexcThresholdPercent, DEFAULT_SPREAD_CONFIG.mexcThresholdPercent),
+    crossExchangeThresholdPercent: nonNegativeNumber(
       record.crossExchangeThresholdPercent ?? saved?.crossExchangeThresholdPercent,
       DEFAULT_SPREAD_CONFIG.crossExchangeThresholdPercent
     ),
@@ -1253,8 +1267,8 @@ function currentScannerStatus(): unknown {
   };
 }
 
-function currentSpreadStatus(config = buildSpreadCheckerConfig({})): SpreadRuntimeStatus {
-  const filterKey = `${config.marketScope}:${config.displayMinSpreadPercent}`;
+function currentSpreadStatus(config = activeSpreadConfig ?? buildSpreadCheckerConfig({})): SpreadRuntimeStatus {
+  const filterKey = `${config.marketScope}:${config.displayMinSpreadPercent}:${config.symbols.join(",")}`;
   if (filterKey !== spreadDisplayFilterKey) {
     spreadVisibleRows.clear();
     spreadDisplayOrder.clear();
@@ -1741,9 +1755,7 @@ function rowsToMexcTickerPrices(rows: unknown[]): MexcTickerPrices {
     }
     const fairPrice = optionalNumberField(record, "fairPrice");
     const lastPrice = optionalNumberField(record, "lastPrice");
-    const amount24 = optionalNumberField(record, "amount24");
-    const volume24 = optionalNumberField(record, "volume24");
-    if (fairPrice === undefined || lastPrice === undefined || amount24 === undefined || volume24 === undefined) {
+    if (fairPrice === undefined || lastPrice === undefined) {
       continue;
     }
     fairPrices.set(symbol, fairPrice);
@@ -1941,6 +1953,11 @@ function positiveNumber(value: unknown, fallback: number): number {
   return Number.isFinite(numberValue) && numberValue > 0 ? numberValue : fallback;
 }
 
+function nonNegativeNumber(value: unknown, fallback: number): number {
+  const numberValue = Number(value);
+  return Number.isFinite(numberValue) && numberValue >= 0 ? numberValue : fallback;
+}
+
 function booleanValue(value: unknown, fallback: boolean): boolean {
   if (typeof value === "boolean") {
     return value;
@@ -1971,14 +1988,6 @@ function isUsdtPerpetualSymbol(symbol: string): boolean {
   return /^[A-Z0-9]+_USDT$/.test(symbol);
 }
 
-function isExcludedSyntheticSymbol(symbol: string): boolean {
-  return (
-    symbol.includes("STOCK_") ||
-    symbol.endsWith("STOCK_USDT") ||
-    /^(HK50|USOIL|UKOIL|XAUT|SILVER|COPPER)_USDT$/.test(symbol)
-  );
-}
-
 async function buildSymbols(saved?: SavedWebConfig): Promise<string[]> {
   const savedSymbols = [saved?.symbol, ...(saved?.symbolHistory ?? [])].filter((item): item is string => Boolean(item));
   const contractSymbols = await getCachedContractSymbols();
@@ -1996,7 +2005,7 @@ async function getCachedContractSymbols(): Promise<string[]> {
     const rows = Array.isArray(data) ? data : Object.values(data as Record<string, unknown>);
     const symbols = rows
       .map((row) => (typeof row === "object" && row !== null ? normalizeSymbol(String((row as Record<string, unknown>).symbol ?? "")) : ""))
-      .filter((symbol) => isUsdtPerpetualSymbol(symbol) && !isExcludedSyntheticSymbol(symbol))
+      .filter(isUsdtPerpetualSymbol)
       .sort();
     if (symbols.length > 0) {
       cachedSymbols = { symbols, expiresAt: now + 10 * 60 * 1000 };

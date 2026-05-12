@@ -195,7 +195,11 @@ export class TradingEngine {
       this.logger.warn("Manual risk override: session loss/trade/cooldown limits bypassed");
     }
 
-    const volume = await this.mexc.calculateVolume(this.config.symbol, this.config.margin, this.config.leverage, price);
+    const [volume, contractDetail] = await Promise.all([
+      this.mexc.calculateVolume(this.config.symbol, this.config.margin, this.config.leverage, price),
+      this.mexc.getContractDetail(this.config.symbol)
+    ]);
+    const contractSize = contractDetail?.contractSize;
     const protection = calculateProtectionPrices({
       side,
       entryPrice: price,
@@ -205,6 +209,9 @@ export class TradingEngine {
     this.logger.info(
       `Opening ${side} ${this.config.symbol} margin=${this.config.margin} leverage=${this.config.leverage} volume=${volume}`
     );
+    if (contractSize !== undefined && contractSize !== 1) {
+      this.logger.info(`Contract size ${this.config.symbol}: ${contractSize}; exchange volume is contracts`);
+    }
     this.logger.info(`Entry reason: ${signal.reason}`);
     this.logger.info(
       `Exchange protection order params SL=${protection.stopLossPrice} TP=${protection.takeProfitPrice}`
@@ -229,6 +236,7 @@ export class TradingEngine {
       side,
       entryPrice: price,
       volume,
+      contractSize,
       positionId: order.positionId
     });
     this.exchangePositionMisses = 0;

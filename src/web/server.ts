@@ -1104,6 +1104,7 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
 
 async function enrichTerminalPositions(client: MexcClient, positions: MexcOpenPosition[]): Promise<TerminalPositionStatus[]> {
   const priceCache = new Map<string, number>();
+  const contractSizeCache = new Map<string, number>();
   return Promise.all(
     positions.map(async (position): Promise<TerminalPositionStatus> => {
       let currentPrice = priceCache.get(position.symbol);
@@ -1111,8 +1112,15 @@ async function enrichTerminalPositions(client: MexcClient, positions: MexcOpenPo
         currentPrice = await client.getTickerPrice(position.symbol);
         priceCache.set(position.symbol, currentPrice);
       }
+      let contractSize = position.contractSize;
+      if (contractSize === undefined) {
+        contractSize = contractSizeCache.get(position.symbol);
+      }
+      if (contractSize === undefined) {
+        contractSize = (await client.getContractDetail(position.symbol))?.contractSize ?? 1;
+        contractSizeCache.set(position.symbol, contractSize);
+      }
       const entryPrice = position.holdAvgPrice ?? position.openAvgPrice;
-      const contractSize = position.contractSize ?? 1;
       const notional = entryPrice === undefined ? undefined : position.holdVol * contractSize * entryPrice;
       const calculatedPnl =
         entryPrice === undefined
@@ -1286,7 +1294,7 @@ function terminalOrderTargets(input: Record<string, unknown>, settings: Required
       : accounts.filter((account) => account.id === settings.accountId || (!settings.accountId && account.role === "master"));
   return selected.map((account) => ({
     account,
-    margin: Math.max(0.1, settings.accountMargins[account.id] ?? settings.margin)
+    margin: Math.max(0.1, settings.accountMode === "group" ? settings.accountMargins[account.id] ?? settings.margin : settings.margin)
   }));
 }
 

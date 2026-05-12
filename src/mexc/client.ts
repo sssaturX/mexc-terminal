@@ -194,8 +194,9 @@ export class MexcClient {
   }
 
   async calculateVolume(symbol: string, margin: number, leverage: number, price: number): Promise<number> {
-    const rawVolume = (margin * leverage) / price;
     const detail = await this.getContractDetail(symbol);
+    const contractSize = detail?.contractSize ?? 1;
+    const rawVolume = (margin * leverage) / (price * contractSize);
     return roundVolume(rawVolume, detail);
   }
 
@@ -313,17 +314,24 @@ export class MexcClient {
     leverage: number;
     positionId?: string;
   }): Promise<SubmitOrderResult> {
+    const exchangePosition =
+      !this.dryRun && input.positionId === undefined
+        ? (await this.getOpenPositionDetails(input.symbol)).find((position) => position.side === input.side)
+        : undefined;
+    const positionId = input.positionId ?? exchangePosition?.positionId;
+    const volume = exchangePosition?.holdVol ?? input.volume;
+    const leverage = exchangePosition?.leverage ?? input.leverage;
     const order: SubmitOrderRequest = {
       symbol: input.symbol,
       price: input.price,
-      vol: input.volume,
+      vol: volume,
       side: input.side === "LONG" ? 4 : 2,
       type: 5,
       openType: 1,
-      leverage: input.leverage
+      leverage
     };
 
-    const numericPositionId = input.positionId === undefined ? undefined : Number(input.positionId);
+    const numericPositionId = positionId === undefined ? undefined : Number(positionId);
     const sdkOrder =
       numericPositionId !== undefined && Number.isFinite(numericPositionId)
         ? { ...order, positionId: numericPositionId }
@@ -339,6 +347,7 @@ export class MexcClient {
 
     try {
       const response = await this.client.submitOrder(order);
+      assertMexcSuccess(response, "Submit order rejected by MEXC");
       const data = unwrapData(response);
       const numericOrderId = typeof data === "number" ? String(data) : undefined;
       return {
@@ -468,6 +477,26 @@ function unwrapData(value: unknown): unknown {
     return value.data;
   }
   return value;
+}
+
+function assertMexcSuccess(response: unknown, fallbackMessage: string): void {
+  if (!isRecord(response)) {
+    return;
+  }
+
+  const success = response.success;
+  const code = pickNumber(response, ["code"]);
+  const failedBySuccess = success === false;
+  const failedByCode = code !== undefined && code !== 0 && code !== 200;
+  if (!failedBySuccess && !failedByCode) {
+    return;
+  }
+
+  const message =
+    pickString(response, ["message", "msg", "error", "errorMsg"]) ??
+    pickString(unwrapData(response), ["message", "msg", "error", "errorMsg"]) ??
+    fallbackMessage;
+  throw new Error(code === undefined ? message : `${message} (MEXC code ${code})`);
 }
 
 function readArray(record: unknown, key: string): unknown[] | undefined {

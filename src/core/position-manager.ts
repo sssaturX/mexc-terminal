@@ -27,6 +27,7 @@ export class PositionManager {
     side: PositionSide;
     entryPrice: number;
     volume: number;
+    contractSize?: number;
     positionId?: string;
   }): Position {
     const { config, side, entryPrice } = input;
@@ -42,6 +43,7 @@ export class PositionManager {
       side,
       entryPrice,
       volume: input.volume,
+      contractSize: input.contractSize,
       margin: config.margin,
       leverage: config.leverage,
       positionId: input.positionId,
@@ -194,14 +196,15 @@ export function calculateProtectionPrices(input: {
 }
 
 export function calculatePnl(position: Position, price: number): number {
+  const contractSize = position.contractSize ?? 1;
   return position.side === "LONG"
-    ? (price - position.entryPrice) * position.volume
-    : (position.entryPrice - price) * position.volume;
+    ? (price - position.entryPrice) * position.volume * contractSize
+    : (position.entryPrice - price) * position.volume * contractSize;
 }
 
 function favorableProfitPercent(position: Position, price: number): number {
   const pnl = calculatePnl(position, price);
-  const notional = position.entryPrice * position.volume;
+  const notional = position.entryPrice * position.volume * (position.contractSize ?? 1);
   return notional === 0 ? 0 : (pnl / notional) * 100;
 }
 
@@ -213,6 +216,7 @@ function buildTradeResult(position: Position, exitPrice: number, reason: ExitRea
     entryPrice: position.entryPrice,
     exitPrice,
     volume: position.volume,
+    contractSize: position.contractSize,
     margin: position.margin,
     leverage: position.leverage,
     pnl,

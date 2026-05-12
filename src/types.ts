@@ -106,6 +106,7 @@ export interface Position {
   side: PositionSide;
   entryPrice: number;
   volume: number;
+  contractSize?: number;
   margin: number;
   leverage: number;
   positionId?: string;
@@ -124,6 +125,7 @@ export interface TradeResult {
   entryPrice: number;
   exitPrice: number;
   volume: number;
+  contractSize?: number;
   margin: number;
   leverage: number;
   pnl: number;

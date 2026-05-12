@@ -8,7 +8,7 @@ import { formatConfigCard } from "../core/format";
 import { PositionManager } from "../core/position-manager";
 import { RiskManager } from "../core/risk-manager";
 import { TradingEngine } from "../core/trading-engine";
-import { MexcAccountAsset, MexcClient, MexcOpenPosition } from "../mexc/client";
+import { isMexcOpenRestrictedError, MexcAccountAsset, MexcClient, MexcOpenPosition } from "../mexc/client";
 import { ScannerEngine } from "../scanner/scanner-engine";
 import { ScannerConfig } from "../scanner/types";
 import { createStrategy, STRATEGY_FACTORIES } from "../strategies";
@@ -355,6 +355,7 @@ const spreadVisibleRows = new Map<string, number>();
 const spreadDisplayOrder = new Map<string, number>();
 const activeSpreadCalls = new Map<string, ActiveSpreadCall>();
 const completedSpreadCalls: CompletedSpreadCall[] = [];
+const restrictedOpenSymbolsByAccount = new Map<string, Set<string>>();
 let spreadDisplayFilterKey = "";
 let spreadDisplayOrderCounter = 0;
 const clients = new Set<ServerResponse>();
@@ -988,6 +989,7 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
     orderId?: string;
     positionId?: string;
     closedPositions?: number;
+    restrictedOpen?: boolean;
     error?: string;
   }>;
 }> {
@@ -1055,6 +1057,9 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
           positionId: closes.at(-1)?.positionId
         });
       } else {
+        if (!dryRun && isRestrictedOpenSymbol(target.account.id, settings.symbol)) {
+          throw new Error(formatRestrictedOpenMessage(settings.symbol));
+        }
         const side = action === "BUY" ? "LONG" : "SHORT";
         const volume = await client.calculateVolume(settings.symbol, target.margin, settings.leverage, price);
         const order = await client.openMarketPosition({
@@ -1075,12 +1080,17 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
         });
       }
     } catch (error) {
+      const restrictedOpen = action !== "CLOSE" && isMexcOpenRestrictedError(error);
+      if (restrictedOpen) {
+        rememberRestrictedOpenSymbol(target.account.id, settings.symbol);
+      }
       results.push({
         accountId: target.account.id,
         accountName: target.account.name,
         margin: target.margin,
         leverage: settings.leverage,
-        error: error instanceof Error ? error.message : String(error)
+        restrictedOpen,
+        error: restrictedOpen ? formatRestrictedOpenMessage(settings.symbol) : error instanceof Error ? error.message : String(error)
       });
     } finally {
       unsubscribe();
@@ -1100,6 +1110,20 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
     dryRun,
     results
   };
+}
+
+function rememberRestrictedOpenSymbol(accountId: string, symbol: string): void {
+  const symbols = restrictedOpenSymbolsByAccount.get(accountId) ?? new Set<string>();
+  symbols.add(symbol);
+  restrictedOpenSymbolsByAccount.set(accountId, symbols);
+}
+
+function isRestrictedOpenSymbol(accountId: string, symbol: string): boolean {
+  return restrictedOpenSymbolsByAccount.get(accountId)?.has(symbol) ?? false;
+}
+
+function formatRestrictedOpenMessage(symbol: string): string {
+  return `${symbol} is restricted by MEXC for this account region; opening is unavailable, only closing existing positions is allowed`;
 }
 
 async function enrichTerminalPositions(client: MexcClient, positions: MexcOpenPosition[]): Promise<TerminalPositionStatus[]> {

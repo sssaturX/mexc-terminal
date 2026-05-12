@@ -39,6 +39,16 @@ export interface MexcOpenPosition {
   raw: unknown;
 }
 
+export class MexcApiResponseError extends Error {
+  constructor(
+    message: string,
+    readonly mexcCode?: number
+  ) {
+    super(message);
+    this.name = "MexcApiResponseError";
+  }
+}
+
 export class MexcClient {
   private readonly client: MexcFuturesClient;
 
@@ -380,6 +390,9 @@ export function classifySdkError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const normalized = `${name} ${message}`.toLowerCase();
 
+  if (isMexcOpenRestrictedError(error)) {
+    return "symbol restricted for this account region; MEXC allows closing only";
+  }
   if (normalized.includes("auth") || normalized.includes("token") || normalized.includes("signature")) {
     return "expired or invalid WEB token";
   }
@@ -397,6 +410,12 @@ export function classifySdkError(error: unknown): string {
   }
 
   return `${name}: ${message}`;
+}
+
+export function isMexcOpenRestrictedError(error: unknown): boolean {
+  const code = isRecord(error) ? pickNumber(error, ["mexcCode", "code"]) : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  return code === 8950 || message.includes("MEXC code 8950") || message.toLowerCase().includes("opening positions");
 }
 
 function roundVolume(volume: number, detail?: ContractDetail): number {
@@ -496,7 +515,7 @@ function assertMexcSuccess(response: unknown, fallbackMessage: string): void {
     pickString(response, ["message", "msg", "error", "errorMsg"]) ??
     pickString(unwrapData(response), ["message", "msg", "error", "errorMsg"]) ??
     fallbackMessage;
-  throw new Error(code === undefined ? message : `${message} (MEXC code ${code})`);
+  throw new MexcApiResponseError(code === undefined ? message : `${message} (MEXC code ${code})`, code);
 }
 
 function readArray(record: unknown, key: string): unknown[] | undefined {

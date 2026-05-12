@@ -641,7 +641,7 @@ function collectConfig() {
     tickIntervalMs: Number(form.elements.tickIntervalMs.value),
     dryRun,
     debug: form.elements.debug.checked,
-    liveConfirmed: dryRun || form.elements.liveConfirmation.value === "YES LIVE"
+    liveConfirmed: !dryRun
   };
 }
 
@@ -956,8 +956,7 @@ function collectTerminalConfig(action) {
     leverage: Number(terminalForm.elements.leverage.value),
     closeSide: terminalForm.elements.closeSide.value,
     dryRun,
-    liveConfirmation: terminalForm.elements.liveConfirmation.value,
-    liveConfirmed: dryRun || terminalForm.elements.liveConfirmation.value === "YES LIVE",
+    liveConfirmed: !dryRun,
     accountMargins: readTerminalMargins()
   };
 }

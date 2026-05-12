@@ -994,9 +994,9 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
   const settings = buildTerminalSettings(input);
   const action = stringOption(input.action, "BUY", ["BUY", "SELL", "CLOSE"]);
   const dryRun = booleanValue(input.dryRun, settings.dryRun);
-  const liveConfirmed = Boolean(input.liveConfirmed) || String(input.liveConfirmation ?? "") === "YES LIVE";
+  const liveConfirmed = Boolean(input.liveConfirmed);
   if (!dryRun && !liveConfirmed) {
-    throw new Error("Live terminal orders require YES LIVE confirmation");
+    throw new Error("Live terminal orders require live mode confirmation from the UI");
   }
   const targets = terminalOrderTargets(input, settings);
   if (targets.length === 0) {
@@ -1384,7 +1384,7 @@ function validateConfig(config: BotConfig, accounts: SavedWebAccount[], liveConf
     throw new Error(`Unknown strategy: ${config.strategyName}`);
   }
   if (!config.dryRun && !liveConfirmed) {
-    throw new Error("Live mode requires YES LIVE confirmation");
+    throw new Error("Live mode requires confirmation from the UI");
   }
 }
 

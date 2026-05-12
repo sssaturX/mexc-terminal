@@ -182,13 +182,23 @@ interface TerminalAccountStatus {
   name: string;
   role: "master" | "slave";
   balance?: MexcAccountAsset;
-  positions: MexcOpenPosition[];
+  positions: TerminalPositionStatus[];
+  pnl: number;
+  roiPercent: number;
   error?: string;
 }
 
 interface TerminalOrderTarget {
   account: SavedWebAccount;
   margin: number;
+}
+
+interface TerminalPositionStatus extends MexcOpenPosition {
+  currentPrice?: number;
+  entryPrice?: number;
+  notional?: number;
+  pnl?: number;
+  roiPercent?: number;
 }
 
 interface SpreadAlertState {
@@ -385,6 +395,14 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson(req);
     await startBot(body as Record<string, unknown>);
     return sendJson(res, 200, { ok: true, status: currentStatus() });
+  }
+  if (url.pathname === "/api/config/save" && req.method === "POST") {
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const config = buildConfig(body);
+    const accounts = buildAccounts(body, config.authToken);
+    validateConfig(config, accounts, true);
+    saveConfig(config, accounts);
+    return sendJson(res, 200, { ok: true, saved: readSaved(), terminal: await currentTerminalStatus(String(body.symbol ?? "")) });
   }
   if (url.pathname === "/api/stop" && req.method === "POST") {
     await stopBot();
@@ -923,12 +941,17 @@ async function currentTerminalStatus(symbolInput?: string): Promise<{
           client.getAccountAsset("USDT"),
           client.getOpenPositionDetails(settings.symbol)
         ]);
+        const enrichedPositions = await enrichTerminalPositions(client, positions);
+        const pnl = enrichedPositions.reduce((sum, position) => sum + (position.pnl ?? 0), 0);
+        const margin = enrichedPositions.reduce((sum, position) => sum + (position.margin ?? 0), 0);
         return {
           id: account.id,
           name: account.name,
           role: account.role,
           balance,
-          positions
+          positions: enrichedPositions,
+          pnl,
+          roiPercent: margin > 0 ? (pnl / margin) * 100 : 0
         };
       } catch (error) {
         return {
@@ -936,6 +959,8 @@ async function currentTerminalStatus(symbolInput?: string): Promise<{
           name: account.name,
           role: account.role,
           positions: [],
+          pnl: 0,
+          roiPercent: 0,
           error: error instanceof Error ? error.message : String(error)
         };
       }
@@ -991,6 +1016,14 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
     });
     const client = new MexcClient(target.account.authToken, dryRun, logger);
     try {
+      if (!dryRun) {
+        const balance = await client.getAccountAsset("USDT");
+        if (balance.availableBalance < target.margin && action !== "CLOSE") {
+          throw new Error(
+            `Insufficient available USDT on ${target.account.name}: ${balance.availableBalance.toFixed(2)} < ${target.margin.toFixed(2)}`
+          );
+        }
+      }
       const price = await client.getTickerPrice(settings.symbol);
       if (action === "CLOSE") {
         const closeSide = stringOption(input.closeSide, "ALL", ["ALL", "LONG", "SHORT"]);
@@ -1067,6 +1100,39 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
     dryRun,
     results
   };
+}
+
+async function enrichTerminalPositions(client: MexcClient, positions: MexcOpenPosition[]): Promise<TerminalPositionStatus[]> {
+  const priceCache = new Map<string, number>();
+  return Promise.all(
+    positions.map(async (position): Promise<TerminalPositionStatus> => {
+      let currentPrice = priceCache.get(position.symbol);
+      if (currentPrice === undefined) {
+        currentPrice = await client.getTickerPrice(position.symbol);
+        priceCache.set(position.symbol, currentPrice);
+      }
+      const entryPrice = position.holdAvgPrice ?? position.openAvgPrice;
+      const contractSize = position.contractSize ?? 1;
+      const notional = entryPrice === undefined ? undefined : position.holdVol * contractSize * entryPrice;
+      const calculatedPnl =
+        entryPrice === undefined
+          ? undefined
+          : position.side === "LONG"
+            ? (currentPrice - entryPrice) * position.holdVol * contractSize
+            : (entryPrice - currentPrice) * position.holdVol * contractSize;
+      const pnl = position.unrealized ?? calculatedPnl;
+      const margin = position.margin ?? (notional !== undefined ? notional / Math.max(position.leverage, 1) : undefined);
+      return {
+        ...position,
+        currentPrice,
+        entryPrice,
+        notional,
+        margin,
+        pnl,
+        roiPercent: margin && pnl !== undefined ? (pnl / margin) * 100 : undefined
+      };
+    })
+  );
 }
 
 function buildConfig(input: Record<string, unknown>): BotConfig {

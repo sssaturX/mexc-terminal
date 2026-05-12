@@ -239,6 +239,16 @@ function bindEvents() {
   document.querySelector("#stopBtn").addEventListener("click", async () => {
     await api("/api/stop", "POST", {});
   });
+  document.querySelector("#saveSetupBtn").addEventListener("click", async () => {
+    try {
+      const data = await api("/api/config/save", "POST", collectConfig());
+      fillSaved(data.saved);
+      updateTerminal(data.terminal);
+      addLog({ level: "INFO", message: "Setup and WEB tokens saved", timestamp: new Date().toISOString() });
+    } catch (error) {
+      addLog({ level: "ERROR", message: error.message, timestamp: new Date().toISOString() });
+    }
+  });
   document.querySelector("#startScannerBtn").addEventListener("click", async () => {
     setScannerBusy(true);
     try {
@@ -871,7 +881,7 @@ function renderTerminalAccounts(accounts) {
             </div>
             <div class="terminal-account-stats">
               <span>Cash ${formatMoney(balance.cashBalance)} USDT</span>
-              <span>uPnL ${formatMoney(balance.unrealized)} USDT</span>
+              <span class="${Number(account.pnl || balance.unrealized || 0) >= 0 ? "positive" : "negative"}">PnL ${formatSignedMoney(account.pnl ?? balance.unrealized)} USDT / ROI ${formatSignedPercent(account.roiPercent)}</span>
             </div>`
       }
     `;
@@ -885,9 +895,12 @@ function renderTerminalAccounts(accounts) {
         for (const position of positions) {
           const row = document.createElement("div");
           row.className = "terminal-position-row";
+          const pnl = Number(position.pnl || 0);
           row.innerHTML = `
             <span class="${position.side === "LONG" ? "positive" : "negative"}">${escapeHtml(position.side)} ${escapeHtml(position.symbol)}</span>
-            <span>vol ${formatNumber(position.holdVol)} @ ${formatNumber(position.holdAvgPrice || position.openAvgPrice || 0)} | ${Number(position.leverage || 0)}x</span>
+            <span class="${pnl >= 0 ? "positive" : "negative"}">${formatSignedMoney(position.pnl)} USDT / ${formatSignedPercent(position.roiPercent)}</span>
+            <span>entry ${formatNumber(position.entryPrice || position.holdAvgPrice || position.openAvgPrice || 0)} -> ${formatNumber(position.currentPrice || 0)}</span>
+            <span>vol ${formatNumber(position.holdVol)} | margin ${formatMoney(position.margin)} | ${Number(position.leverage || 0)}x</span>
           `;
           card.appendChild(row);
         }
@@ -1243,6 +1256,16 @@ function formatNumber(value) {
 function formatMoney(value) {
   const numberValue = Number(value || 0);
   return numberValue.toFixed(2);
+}
+
+function formatSignedMoney(value) {
+  const numberValue = Number(value || 0);
+  return `${numberValue >= 0 ? "+" : ""}${numberValue.toFixed(4)}`;
+}
+
+function formatSignedPercent(value) {
+  const numberValue = Number(value || 0);
+  return `${numberValue >= 0 ? "+" : ""}${numberValue.toFixed(2)}%`;
 }
 
 function formatDuration(ms) {

@@ -511,9 +511,9 @@ textarea:focus {
 .terminal-account-head,
 .terminal-account-stats,
 .terminal-position-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(120px, 1fr) minmax(150px, 1fr) minmax(150px, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
 
@@ -783,6 +783,7 @@ button:disabled {
   .manual-grid,
   .terminal-actions,
   .terminal-summary,
+  .terminal-position-row,
   .terminal-margin-row {
     grid-template-columns: 1fr;
   }

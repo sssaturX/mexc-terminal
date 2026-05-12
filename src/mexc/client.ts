@@ -33,6 +33,7 @@ export interface MexcOpenPosition {
   openAvgPrice?: number;
   liquidatePrice?: number;
   margin?: number;
+  contractSize?: number;
   leverage: number;
   unrealized?: number;
   raw: unknown;
@@ -248,6 +249,7 @@ export class MexcClient {
             openAvgPrice: pickNumber(position, ["openAvgPrice"]),
             liquidatePrice: pickNumber(position, ["liquidatePrice"]),
             margin: pickNumber(position, ["im", "margin", "positionMargin"]),
+            contractSize: pickNumber(position, ["contractSize", "contractUnit"]),
             leverage: pickNumber(position, ["leverage"]) ?? 1,
             unrealized: pickNumber(position, ["unrealized", "unrealizedPnl"]),
             raw: position

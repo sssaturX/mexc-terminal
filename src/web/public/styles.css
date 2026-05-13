@@ -523,6 +523,11 @@ textarea:focus {
   font-size: 12px;
 }
 
+.terminal-price-line strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
 button {
   height: 40px;
   border: 1px solid transparent;

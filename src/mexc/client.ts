@@ -31,6 +31,8 @@ export interface MexcOpenPosition {
   frozenVol?: number;
   holdAvgPrice?: number;
   openAvgPrice?: number;
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
   liquidatePrice?: number;
   margin?: number;
   contractSize?: number;
@@ -259,6 +261,8 @@ export class MexcClient {
             frozenVol: pickNumber(position, ["frozenVol"]),
             holdAvgPrice: pickNumber(position, ["holdAvgPrice"]),
             openAvgPrice: pickNumber(position, ["openAvgPrice"]),
+            stopLossPrice: pickNumber(position, ["stopLossPrice", "slPrice"]),
+            takeProfitPrice: pickNumber(position, ["takeProfitPrice", "tpPrice"]),
             liquidatePrice: pickNumber(position, ["liquidatePrice"]),
             margin: pickNumber(position, ["im", "margin", "positionMargin"]),
             contractSize: pickNumber(position, ["contractSize", "contractUnit"]),

@@ -227,6 +227,12 @@
             <button type="button" class="primary" id="startScannerBtn">Start scanner</button>
             <button type="button" class="danger" id="stopScannerBtn">Stop scanner</button>
           </div>
+
+          <div class="section-title">Blacklist</div>
+          <label>
+            <span>Excluded symbols</span>
+            <textarea name="blacklistSymbols" rows="3" placeholder="REDO_USDT, 1000BONK_USDT"></textarea>
+          </label>
         </form>
 
         <aside class="side">
@@ -315,6 +321,19 @@
                 <option value="SHORT">SHORT only</option>
               </select>
             </label>
+            <label>
+              <span>Take profit mode</span>
+              <select name="takeProfitMode">
+                <option value="none">No TP</option>
+                <option value="profitUsdt">Profit in USDT</option>
+                <option value="roePercent">ROE on margin %</option>
+                <option value="pricePercent">Price move %</option>
+              </select>
+            </label>
+            <label>
+              <span>Take profit value</span>
+              <input name="takeProfitValue" type="number" min="0" step="0.01" />
+            </label>
           </div>
 
           <div class="section-title">Group margins</div>
@@ -329,6 +348,7 @@
             <button type="button" class="long" data-terminal-action="BUY">Open LONG</button>
             <button type="button" class="short" data-terminal-action="SELL">Open SHORT</button>
             <button type="button" class="danger" data-terminal-action="CLOSE">Close</button>
+            <button type="button" class="ghost" id="blacklistTerminalSymbolBtn">Blacklist symbol</button>
             <button type="button" class="ghost" id="refreshTerminalBtn">Refresh</button>
           </div>
         </form>

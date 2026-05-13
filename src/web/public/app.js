@@ -80,6 +80,8 @@ const terminalDefaults = {
   accountMode: "single",
   margin: 10,
   leverage: 10,
+  takeProfitMode: "none",
+  takeProfitValue: 0,
   dryRun: true,
   accountMargins: {}
 };
@@ -159,6 +161,7 @@ function fillSaved(saved = {}) {
   form.elements.scannerMinGrade.value = scanner.minGrade || scannerDefaults.minGrade;
   form.elements.scannerTickIntervalMs.value = scanner.tickIntervalMs || scannerDefaults.tickIntervalMs;
   form.elements.scannerStrictZeroFee.checked = Boolean(scanner.strictZeroFee ?? scannerDefaults.strictZeroFee);
+  form.elements.blacklistSymbols.value = (saved.blacklistSymbols || []).toString();
 }
 
 function fillSpreadSettings(settings = {}) {
@@ -196,6 +199,8 @@ function fillTerminalSettings(settings = {}) {
   terminalForm.elements.accountMode.value = settings.accountMode || terminalDefaults.accountMode;
   terminalForm.elements.margin.value = settings.margin ?? terminalDefaults.margin;
   terminalForm.elements.leverage.value = settings.leverage ?? terminalDefaults.leverage;
+  terminalForm.elements.takeProfitMode.value = settings.takeProfitMode || terminalDefaults.takeProfitMode;
+  terminalForm.elements.takeProfitValue.value = settings.takeProfitValue ?? terminalDefaults.takeProfitValue;
   terminalForm.elements.dryRun.checked = settings.dryRun ?? terminalDefaults.dryRun;
   terminalForm.dataset.accountMargins = JSON.stringify(settings.accountMargins || terminalDefaults.accountMargins);
   if (settings.accountId) {
@@ -289,6 +294,7 @@ function bindEvents() {
     updateSpread(data.spread);
   });
   document.querySelector("#refreshTerminalBtn").addEventListener("click", refreshTerminal);
+  document.querySelector("#blacklistTerminalSymbolBtn").addEventListener("click", addTerminalSymbolToBlacklist);
   terminalForm.elements.accountMode.addEventListener("change", () => {
     renderTerminalMargins(currentTerminalAccounts(), readTerminalMargins());
   });
@@ -639,6 +645,7 @@ function collectConfig() {
     maxDailyLoss: Number(form.elements.maxDailyLoss.value),
     cooldownSeconds: Number(form.elements.cooldownSeconds.value),
     tickIntervalMs: Number(form.elements.tickIntervalMs.value),
+    blacklistSymbols: form.elements.blacklistSymbols.value,
     dryRun,
     debug: form.elements.debug.checked,
     liveConfirmed: !dryRun
@@ -662,6 +669,7 @@ function collectScannerConfig() {
       minGrade: form.elements.scannerMinGrade.value,
       tickIntervalMs: Number(form.elements.scannerTickIntervalMs.value),
       strictZeroFee: form.elements.scannerStrictZeroFee.checked,
+      blacklistSymbols: form.elements.blacklistSymbols.value,
       dryRun: form.elements.dryRun.checked,
       debug: form.elements.debug.checked
     }
@@ -680,6 +688,7 @@ function collectSpreadConfig() {
     alertLanguage: spreadForm.elements.alertLanguage.value,
     notificationMethod: spreadForm.elements.notificationMethod.value,
     pushProvider: spreadForm.elements.pushProvider.value,
+    blacklistSymbols: form.elements.blacklistSymbols.value,
     dryRun: spreadForm.elements.dryRun.checked,
     twilioAccountSid: spreadForm.elements.twilioAccountSid.value,
     twilioAuthToken: spreadForm.elements.twilioAuthToken.value,
@@ -899,8 +908,8 @@ function renderTerminalAccounts(accounts) {
           row.innerHTML = `
             <span class="${position.side === "LONG" ? "positive" : "negative"}">${escapeHtml(position.side)} ${escapeHtml(position.symbol)}</span>
             <span class="${pnl >= 0 ? "positive" : "negative"}">${formatSignedMoney(position.pnl)} USDT / ${formatSignedPercent(position.roiPercent)}</span>
-            <span>entry ${formatNumber(position.entryPrice || position.holdAvgPrice || position.openAvgPrice || 0)} -> ${formatNumber(position.currentPrice || 0)}</span>
-            <span>vol ${formatNumber(position.holdVol)} | margin ${formatMoney(position.margin)} | ${Number(position.leverage || 0)}x</span>
+            <span class="terminal-price-line">Entry <strong>${formatNumber(position.entryPrice || position.holdAvgPrice || position.openAvgPrice || 0)}</strong> | Now <strong>${formatNumber(position.currentPrice || 0)}</strong></span>
+            <span>TP ${position.takeProfitPrice ? formatNumber(position.takeProfitPrice) : "-"} | vol ${formatNumber(position.holdVol)} | margin ${formatMoney(position.margin)} | ${Number(position.leverage || 0)}x</span>
           `;
           card.appendChild(row);
         }
@@ -955,10 +964,28 @@ function collectTerminalConfig(action) {
     margin: Number(terminalForm.elements.margin.value),
     leverage: Number(terminalForm.elements.leverage.value),
     closeSide: terminalForm.elements.closeSide.value,
+    takeProfitMode: terminalForm.elements.takeProfitMode.value,
+    takeProfitValue: Number(terminalForm.elements.takeProfitValue.value),
     dryRun,
     liveConfirmed: !dryRun,
     accountMargins: readTerminalMargins()
   };
+}
+
+async function addTerminalSymbolToBlacklist() {
+  const symbol = normalizeSymbol(terminalForm.elements.symbol.value || "");
+  if (!symbol) {
+    return;
+  }
+  try {
+    const data = await api("/api/blacklist/add", "POST", { symbol });
+    form.elements.blacklistSymbols.value = (data.saved?.blacklistSymbols || []).toString();
+    symbolSuggestions = Array.isArray(data.symbols) ? data.symbols : symbolSuggestions.filter((item) => item !== symbol);
+    fillSymbols(symbolSuggestions, form.elements.symbol.value);
+    addLog({ level: "WARN", message: `${symbol} added to blacklist`, timestamp: new Date().toISOString() });
+  } catch (error) {
+    addLog({ level: "ERROR", message: error.message, timestamp: new Date().toISOString() });
+  }
 }
 
 function readTerminalMargins() {

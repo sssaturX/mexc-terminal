@@ -21,6 +21,7 @@ type SavedWebConfig = Omit<BotConfig, "strategyName" | "strategyParams"> & {
   spreadChecker?: SavedSpreadCheckerConfig;
   terminal?: SavedTerminalConfig;
   symbolHistory?: string[];
+  blacklistSymbols?: string[];
 };
 
 interface SavedWebAccount {
@@ -79,6 +80,8 @@ interface SavedTerminalConfig {
   accountId?: string;
   margin?: number;
   leverage?: number;
+  takeProfitMode?: "none" | "profitUsdt" | "roePercent" | "pricePercent";
+  takeProfitValue?: number;
   dryRun?: boolean;
   accountMargins?: Record<string, number>;
 }
@@ -204,6 +207,7 @@ interface TerminalPositionStatus extends MexcOpenPosition {
 interface SpreadAlertState {
   aboveThreshold: boolean;
   lastAlertAt: number;
+  tradePlan?: string;
 }
 
 interface MexcTickerPrices {
@@ -402,8 +406,13 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const config = buildConfig(body);
     const accounts = buildAccounts(body, config.authToken);
     validateConfig(config, accounts, true);
-    saveConfig(config, accounts);
+    saveConfig(config, accounts, body.blacklistSymbols);
     return sendJson(res, 200, { ok: true, saved: readSaved(), terminal: await currentTerminalStatus(String(body.symbol ?? "")) });
+  }
+  if (url.pathname === "/api/blacklist/add" && req.method === "POST") {
+    const body = (await readJson(req)) as Record<string, unknown>;
+    const saved = addBlacklistSymbol(String(body.symbol ?? ""));
+    return sendJson(res, 200, { ok: true, saved, symbols: await buildSymbols(saved) });
   }
   if (url.pathname === "/api/stop" && req.method === "POST") {
     await stopBot();
@@ -424,7 +433,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (url.pathname === "/api/spread-checker/save" && req.method === "POST") {
     const body = await readJson(req);
     const config = buildSpreadCheckerConfig(body as Record<string, unknown>);
-    saveSpreadCheckerConfig(config);
+    saveSpreadCheckerConfig(config, (body as Record<string, unknown>).blacklistSymbols);
     if (spreadCheckerRunning) {
       activeSpreadConfig = config;
       restartSpreadCheckerTimer(config);
@@ -436,6 +445,7 @@ async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const body = await readJson(req);
     const config = buildSpreadCheckerConfig(body as Record<string, unknown>);
     await startSpreadChecker(config);
+    saveBlacklistSymbols((body as Record<string, unknown>).blacklistSymbols);
     return sendJson(res, 200, { ok: true, spread: currentSpreadStatus(config) });
   }
   if (url.pathname === "/api/spread-checker/stop" && req.method === "POST") {
@@ -572,7 +582,10 @@ async function runSpreadCheckerCycle(config: SpreadCheckerConfig): Promise<void>
       fetchMexcContractDetails()
     ]);
     const { fairPrices, lastPrices: mexcLastPrices, indexPrices: mexcIndexPrices } = mexcPrices;
-    const symbols = Array.from(new Set([...fairPrices.keys(), ...mexcLastPrices.keys()])).filter(isUsdtPerpetualSymbol).sort();
+    const blacklist = blacklistSet();
+    const symbols = Array.from(new Set([...fairPrices.keys(), ...mexcLastPrices.keys()]))
+      .filter((symbol) => isUsdtPerpetualSymbol(symbol) && !blacklist.has(symbol))
+      .sort();
     const rows: SpreadRow[] = [];
     for (const symbol of symbols) {
       const fairPrice = fairPrices.get(symbol);
@@ -704,22 +717,24 @@ async function processSpreadThreshold(
   }
 
   const stateKey = `${row.symbol}:${type}`;
+  const tradePlan = spreadTradePlan(row, type);
   const state = spreadAlertStates.get(stateKey) ?? { aboveThreshold: false, lastAlertAt: 0 };
   if (spreadPercent < threshold) {
     state.aboveThreshold = false;
+    state.tradePlan = undefined;
     spreadAlertStates.set(stateKey, state);
     return;
   }
 
   const now = Date.now();
-  const cooldownElapsed = state.lastAlertAt === 0 || now - state.lastAlertAt >= config.alertCooldownSec * 1000;
-  if (state.aboveThreshold && !cooldownElapsed) {
+  if (state.aboveThreshold && state.tradePlan === tradePlan) {
     spreadAlertStates.set(stateKey, state);
     return;
   }
 
   state.aboveThreshold = true;
   state.lastAlertAt = now;
+  state.tradePlan = tradePlan;
   spreadAlertStates.set(stateKey, state);
 
   const call = ensureSpreadCall(row, type, threshold, spreadPercent);
@@ -850,7 +865,7 @@ async function startBot(input: Record<string, unknown>): Promise<void> {
   const baseConfig = buildConfig(input);
   const accounts = buildAccounts(input, baseConfig.authToken);
   validateConfig(baseConfig, accounts, Boolean(input.liveConfirmed));
-  saveConfig(baseConfig, accounts);
+  saveConfig(baseConfig, accounts, input.blacklistSymbols);
 
   runtimes = accounts.map((account) => {
     const config: BotConfig = {
@@ -986,6 +1001,9 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
     margin: number;
     leverage: number;
     volume?: number;
+    entryPrice?: number;
+    currentPrice?: number;
+    takeProfitPrice?: number;
     orderId?: string;
     positionId?: string;
     closedPositions?: number;
@@ -1062,12 +1080,14 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
         }
         const side = action === "BUY" ? "LONG" : "SHORT";
         const volume = await client.calculateVolume(settings.symbol, target.margin, settings.leverage, price);
+        const takeProfitPrice = terminalTakeProfitPrice(side, price, target.margin, settings.leverage, settings);
         const order = await client.openMarketPosition({
           symbol: settings.symbol,
           side,
           price,
           volume,
-          leverage: settings.leverage
+          leverage: settings.leverage,
+          takeProfitPrice
         });
         results.push({
           accountId: target.account.id,
@@ -1075,6 +1095,9 @@ async function executeTerminalOrder(input: Record<string, unknown>): Promise<{
           margin: target.margin,
           leverage: settings.leverage,
           volume,
+          entryPrice: price,
+          currentPrice: price,
+          takeProfitPrice,
           orderId: order.orderId,
           positionId: order.positionId
         });
@@ -1124,6 +1147,28 @@ function isRestrictedOpenSymbol(accountId: string, symbol: string): boolean {
 
 function formatRestrictedOpenMessage(symbol: string): string {
   return `${symbol} is restricted by MEXC for this account region; opening is unavailable, only closing existing positions is allowed`;
+}
+
+function terminalTakeProfitPrice(
+  side: "LONG" | "SHORT",
+  entryPrice: number,
+  margin: number,
+  leverage: number,
+  settings: Required<SavedTerminalConfig>
+): number | undefined {
+  if (settings.takeProfitMode === "none" || settings.takeProfitValue <= 0) {
+    return undefined;
+  }
+  let priceMovePercent: number;
+  if (settings.takeProfitMode === "profitUsdt") {
+    priceMovePercent = ((settings.takeProfitValue / Math.max(margin * leverage, 1e-9)) * 100);
+  } else if (settings.takeProfitMode === "roePercent") {
+    priceMovePercent = settings.takeProfitValue / Math.max(leverage, 1);
+  } else {
+    priceMovePercent = settings.takeProfitValue;
+  }
+  const multiplier = side === "LONG" ? 1 + priceMovePercent / 100 : 1 - priceMovePercent / 100;
+  return entryPrice * multiplier;
 }
 
 async function enrichTerminalPositions(client: MexcClient, positions: MexcOpenPosition[]): Promise<TerminalPositionStatus[]> {
@@ -1210,11 +1255,14 @@ function buildScannerConfig(input: Record<string, unknown>): ScannerConfig {
   const fallbackToken = String(input.authToken ?? saved?.authToken ?? process.env.MEXC_WEB_AUTH_TOKEN ?? "").trim();
   const accounts = buildAccounts(input.accounts ? input : { ...input, accounts: saved?.accounts, masterAccountId: saved?.masterAccountId }, fallbackToken);
   const scannerInput = typeof input.scanner === "object" && input.scanner !== null ? (input.scanner as Record<string, unknown>) : input;
-  const symbols = parseSymbolList(scannerInput.symbols ?? saved?.scanner?.symbols ?? saved?.symbolHistory ?? saved?.symbol ?? "BTC_USDT,ETH_USDT,SOL_USDT,DOGE_USDT,PEPE_USDT");
+  const blacklist = blacklistSet(input.blacklistSymbols ?? scannerInput.blacklistSymbols);
+  const symbols = parseSymbolList(scannerInput.symbols ?? saved?.scanner?.symbols ?? saved?.symbolHistory ?? saved?.symbol ?? "BTC_USDT,ETH_USDT,SOL_USDT,DOGE_USDT,PEPE_USDT")
+    .filter((symbol) => !blacklist.has(symbol));
+  const fallbackSymbols = POPULAR_SYMBOLS.filter((symbol) => !blacklist.has(symbol));
   const config: ScannerConfig = {
     accounts,
     masterAccountId: String(input.masterAccountId ?? saved?.masterAccountId ?? accounts.find((account) => account.role === "master")?.id ?? accounts[0]?.id ?? ""),
-    symbols,
+    symbols: symbols.length > 0 ? symbols : fallbackSymbols,
     strictZeroFee: booleanValue(scannerInput.strictZeroFee, saved?.scanner?.strictZeroFee ?? false),
     executionMode: String(scannerInput.executionMode ?? saved?.scanner?.executionMode ?? "scanner") === "semi_auto" ? "semi_auto" : "scanner",
     dryRun: booleanValue(scannerInput.dryRun, saved?.dryRun ?? true),
@@ -1226,7 +1274,7 @@ function buildScannerConfig(input: Record<string, unknown>): ScannerConfig {
     tickIntervalMs: positiveNumber(scannerInput.tickIntervalMs ?? saved?.scanner?.tickIntervalMs, 2000),
     debug: booleanValue(scannerInput.debug, saved?.debug ?? false)
   };
-  saveScannerConfig(config);
+  saveScannerConfig(config, input.blacklistSymbols ?? scannerInput.blacklistSymbols);
   return config;
 }
 
@@ -1240,10 +1288,12 @@ function buildSpreadCheckerConfig(input: Record<string, unknown>): SpreadChecker
     ["sms", "push", "call", "email_to_sms"]
   );
   const pushProvider = stringOption(record.pushProvider, saved?.pushProvider ?? DEFAULT_SPREAD_CONFIG.pushProvider, ["pushover", "ntfy"]);
-  const symbols = parseSymbolList(record.symbols ?? saved?.symbols ?? DEFAULT_SPREAD_CONFIG.symbols).filter(isUsdtPerpetualSymbol);
+  const blacklist = blacklistSet(record.blacklistSymbols);
+  const symbols = parseSymbolList(record.symbols ?? saved?.symbols ?? DEFAULT_SPREAD_CONFIG.symbols)
+    .filter((symbol) => isUsdtPerpetualSymbol(symbol) && !blacklist.has(symbol));
   return {
     marketScope,
-    symbols: (symbols.length > 0 ? symbols : DEFAULT_SPREAD_CONFIG.symbols).slice(0, 50),
+    symbols: (symbols.length > 0 ? symbols : DEFAULT_SPREAD_CONFIG.symbols.filter((symbol) => !blacklist.has(symbol))).slice(0, 50),
     displayMinSpreadPercent: nonNegativeNumber(
       record.displayMinSpreadPercent ?? saved?.displayMinSpreadPercent,
       DEFAULT_SPREAD_CONFIG.displayMinSpreadPercent
@@ -1289,6 +1339,8 @@ function buildTerminalSettings(input: Record<string, unknown>): Required<SavedTe
     accountId: String(input.accountId ?? terminal?.accountId ?? defaultAccount?.id ?? ""),
     margin: positiveNumber(input.margin ?? terminal?.margin, 10),
     leverage: Math.max(1, Math.min(200, positiveNumber(input.leverage ?? terminal?.leverage, 10))),
+    takeProfitMode: stringOption(input.takeProfitMode, terminal?.takeProfitMode ?? "none", ["none", "profitUsdt", "roePercent", "pricePercent"]),
+    takeProfitValue: nonNegativeNumber(input.takeProfitValue ?? terminal?.takeProfitValue, 0),
     dryRun: booleanValue(input.dryRun, terminal?.dryRun ?? saved?.dryRun ?? true),
     accountMargins: parseTerminalAccountMargins(input.accountMargins, terminal?.accountMargins)
   };
@@ -1577,7 +1629,7 @@ function readSaved(): SavedWebConfig | undefined {
   return JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8")) as SavedWebConfig;
 }
 
-function saveConfig(config: BotConfig, accounts: SavedWebAccount[]): void {
+function saveConfig(config: BotConfig, accounts: SavedWebAccount[], blacklistInput?: unknown): void {
   const previous = readSaved();
   const {
     strategyName: _strategyName,
@@ -1593,18 +1645,20 @@ function saveConfig(config: BotConfig, accounts: SavedWebAccount[]): void {
     authToken: master?.authToken ?? saved.authToken,
     accounts,
     masterAccountId: master?.id,
+    blacklistSymbols: parseSymbolList(blacklistInput ?? previous?.blacklistSymbols),
     symbolHistory: Array.from(new Set([config.symbol, ...(previous?.symbolHistory ?? []), previous?.symbol].filter(Boolean))).slice(0, 10)
   };
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
   fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
-function saveScannerConfig(config: ScannerConfig): void {
+function saveScannerConfig(config: ScannerConfig, blacklistInput?: unknown): void {
   const previous = readSaved();
   const next: SavedWebConfig = {
     ...(previous ?? {} as SavedWebConfig),
     accounts: config.accounts,
     masterAccountId: config.masterAccountId,
+    blacklistSymbols: parseSymbolList(blacklistInput ?? previous?.blacklistSymbols),
     scanner: {
       symbols: config.symbols,
       strictZeroFee: config.strictZeroFee,
@@ -1621,10 +1675,11 @@ function saveScannerConfig(config: ScannerConfig): void {
   fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
 }
 
-function saveSpreadCheckerConfig(config: SpreadCheckerConfig): void {
+function saveSpreadCheckerConfig(config: SpreadCheckerConfig, blacklistInput?: unknown): void {
   const previous = readSaved();
   const next: SavedWebConfig = {
     ...((previous ?? {}) as SavedWebConfig),
+    blacklistSymbols: parseSymbolList(blacklistInput ?? previous?.blacklistSymbols),
     spreadChecker: config
   };
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
@@ -1810,6 +1865,7 @@ async function sendPushover(config: SpreadCheckerConfig, message: string): Promi
       token: config.pushoverAppToken,
       user: config.pushoverUserKey,
       title: "Spread Checker",
+      html: "1",
       message
     })
   );
@@ -1855,6 +1911,7 @@ function formatMexcSpreadAlert(
 ): string {
   const url = `https://www.mexc.com/futures/${encodeURIComponent(row.symbol)}`;
   const tradeSide = mexcInternalTradeSide(row);
+  const sideLabel = notificationBold(config, tradeSide);
   const terminalUrl = terminalTradeUrl(row.symbol, tradeSide);
   const statLines = formatSpreadCallStatLines(config, context);
   if (config.alertLanguage === "en") {
@@ -1863,7 +1920,7 @@ function formatMexcSpreadAlert(
       url,
       `Terminal: ${terminalUrl}`,
       "",
-      `✅ Open on MEXC: ${tradeSide}`,
+      `✅ Open on MEXC: ${sideLabel}`,
       tradeSide === "SHORT" ? "Last is above Fair, trade expects move down to Fair." : "Last is below Fair, trade expects move up to Fair.",
       ...statLines,
       "",
@@ -1886,7 +1943,7 @@ function formatMexcSpreadAlert(
     url,
     `Терминал: ${terminalUrl}`,
     "",
-    `✅ Открывать на MEXC: ${tradeSide}`,
+    `✅ Открывать на MEXC: ${sideLabel}`,
     tradeSide === "SHORT" ? "Last выше Fair, идея: шорт к возврату на Fair." : "Last ниже Fair, идея: лонг к возврату на Fair.",
     ...statLines,
     "",
@@ -1920,6 +1977,8 @@ function formatCrossSpreadAlert(
   const fundingMexc = formatFunding(row.mexcFundingRate);
   const fundingGate = formatFunding(row.gateFundingRate);
   const mexcSide = longExchange === "MEXC" ? "LONG" : "SHORT";
+  const longLabel = notificationBold(config, "LONG");
+  const shortLabel = notificationBold(config, "SHORT");
   const terminalUrl = terminalTradeUrl(row.symbol, mexcSide);
   const statLines = formatSpreadCallStatLines(config, context);
 
@@ -1929,7 +1988,7 @@ function formatCrossSpreadAlert(
       `📌 ${row.symbol} (COPY: ${base})`,
       `Terminal MEXC ${mexcSide}: ${terminalUrl}`,
       "",
-      `✅ Open: LONG ${longExchange} / SHORT ${shortExchange}`,
+      `✅ Open: ${longLabel} ${longExchange} / ${shortLabel} ${shortExchange}`,
       ...statLines,
       "",
       `🟢 Long  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
@@ -1946,7 +2005,7 @@ function formatCrossSpreadAlert(
     `📌 ${row.symbol} (COPY: ${base})`,
     `Терминал MEXC ${mexcSide}: ${terminalUrl}`,
     "",
-    `✅ Открывать: LONG ${longExchange} / SHORT ${shortExchange}`,
+    `✅ Открывать: ${longLabel} ${longExchange} / ${shortLabel} ${shortExchange}`,
     ...statLines,
     "",
     `🟢 Лонг  ${longExchange.padEnd(5)}: $${formatAlertPrice(longPrice)}`,
@@ -1977,6 +2036,16 @@ function spreadTradePlan(row: SpreadRow, type: SpreadCallType): string {
 function terminalTradeUrl(symbol: string, side: "LONG" | "SHORT"): string {
   const action = side === "LONG" ? "BUY" : "SELL";
   return `${PUBLIC_WEB_BASE_URL}/?tab=terminal&symbol=${encodeURIComponent(symbol)}&side=${side}&action=${action}`;
+}
+
+function notificationBold(config: SpreadCheckerConfig, text: string): string {
+  if (config.notificationMethod === "push" && config.pushProvider === "pushover") {
+    return `<b>${text}</b>`;
+  }
+  if (config.notificationMethod === "push" && config.pushProvider === "ntfy") {
+    return `**${text}**`;
+  }
+  return text;
 }
 
 function formatSpreadCallStatLines(config: SpreadCheckerConfig, context?: { call: ActiveSpreadCall; stats: SpreadCallStats }): string[] {
@@ -2299,6 +2368,31 @@ function parseSymbolList(value: unknown): string[] {
   );
 }
 
+function blacklistSet(input?: unknown): Set<string> {
+  const saved = readSaved();
+  return new Set(parseSymbolList(input ?? saved?.blacklistSymbols));
+}
+
+function saveBlacklistSymbols(input: unknown): SavedWebConfig {
+  const previous = readSaved();
+  const next: SavedWebConfig = {
+    ...((previous ?? {}) as SavedWebConfig),
+    blacklistSymbols: parseSymbolList(input ?? previous?.blacklistSymbols)
+  };
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
+  fs.writeFileSync(SETTINGS_PATH, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+  return next;
+}
+
+function addBlacklistSymbol(symbolInput: string): SavedWebConfig {
+  const symbol = normalizeSymbol(symbolInput);
+  if (!isUsdtPerpetualSymbol(symbol)) {
+    throw new Error("Blacklist symbol must look like BTC_USDT");
+  }
+  const previous = readSaved();
+  return saveBlacklistSymbols([...(previous?.blacklistSymbols ?? []), symbol]);
+}
+
 function isUsdtPerpetualSymbol(symbol: string): boolean {
   return /^[A-Z0-9]+_USDT$/.test(symbol);
 }
@@ -2306,7 +2400,10 @@ function isUsdtPerpetualSymbol(symbol: string): boolean {
 async function buildSymbols(saved?: SavedWebConfig): Promise<string[]> {
   const savedSymbols = [saved?.symbol, ...(saved?.symbolHistory ?? [])].filter((item): item is string => Boolean(item));
   const contractSymbols = await getCachedContractSymbols();
-  return Array.from(new Set([...savedSymbols, ...contractSymbols, ...POPULAR_SYMBOLS].filter(isUsdtPerpetualSymbol))).sort();
+  const blacklist = blacklistSet(saved?.blacklistSymbols);
+  return Array.from(new Set([...savedSymbols, ...contractSymbols, ...POPULAR_SYMBOLS].filter(isUsdtPerpetualSymbol)))
+    .filter((symbol) => !blacklist.has(symbol))
+    .sort();
 }
 
 async function getCachedContractSymbols(): Promise<string[]> {

@@ -257,7 +257,7 @@ const CROSS_INDEX_COMPATIBILITY_MAX_PERCENT = 5;
 const CROSS_LAST_PRICE_SANITY_MAX_PERCENT = 20;
 const SPREAD_DISPLAY_LINGER_MS = 3 * 60 * 1000;
 const MAX_COMPLETED_SPREAD_CALLS = 500;
-const PUBLIC_WEB_BASE_URL = (process.env.WEB_PUBLIC_BASE_URL ?? "https://mexc.moontap.space").replace(/\/$/, "");
+const PUBLIC_WEB_BASE_URL = (process.env.WEB_PUBLIC_BASE_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const DEFAULT_SPREAD_CONFIG: SpreadCheckerConfig = {
   marketScope: "all",
   symbols: ["BTC_USDT", "ETH_USDT", "SOL_USDT"],

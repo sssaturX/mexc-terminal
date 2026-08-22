@@ -19,6 +19,15 @@
     "typescript"
   ],
   "license": "MIT",
+  "author": "santoridev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sssaturX/mexc-terminal.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sssaturX/mexc-terminal/issues"
+  },
+  "homepage": "https://github.com/sssaturX/mexc-terminal#readme",
   "engines": {
     "node": ">=18"
   },

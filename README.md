@@ -2,7 +2,9 @@
 
 Console TypeScript/Node.js bot for MEXC Futures. It uses the unofficial `mexc-futures-sdk`, so dry-run mode, risk limits and verbose logging are first-class parts of the project.
 
-> Warning: the SDK uses a browser session WEB token and reverse-engineered endpoints. Live trading can break after MEXC changes the website, expires a token, rate-limits requests, or rejects an order. Default mode is always `dry-run=true`.
+> Warning: the SDK uses a browser session WEB token and reverse-engineered endpoints. Live trading can break after MEXC changes the website, expires a token, rate-limits requests, or rejects an order. Default mode is always `dry-run=true`. This is not financial advice. You can lose money.
+
+License: [MIT](LICENSE) · [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Going public](docs/GOING_PUBLIC.md)
 
 ## Install
 
@@ -34,7 +36,7 @@ MEXC_SYMBOL=BTC_USDT
 MEXC_DRY_RUN=true
 ```
 
-Tokens are never hardcoded in source code. `.env`, `config/settings.json` and `logs/` are ignored by git.
+Tokens are never hardcoded in source code. `.env`, `config/settings.json`, `config.yaml` and `logs/` are ignored by git. Put a real WEB token only in those local files.
 
 ## Dry-Run Example
 
@@ -256,6 +258,8 @@ npm run web
 
 Open `http://127.0.0.1:8787`, switch to `Spread Checker`, choose `All USDT futures` or `Custom symbols`, configure the minimum display spread %, alert thresholds and notification credentials, then start the checker. The all-market mode filters MEXC and Gate to `_USDT` futures so inverse contracts like `BTC_USD` are not mixed into USDT comparisons. Web settings are saved in ignored `config/settings.json`.
 
+Notification messages can include a link back to the web UI. Set `WEB_PUBLIC_BASE_URL` in `.env` to your public hostname when you deploy; the default is `http://127.0.0.1:8787`. See [deploy/README.md](deploy/README.md).
+
 ### Notification Setup
 
 SMS via Twilio:
@@ -308,3 +312,18 @@ SMTP_PASSWORD=...
 EMAIL_FROM=alerts@example.com
 EMAIL_TO_SMS_ADDRESS=15557654321@carrier-gateway.example
 ```
+
+## Documentation
+
+| Document | Audience |
+| --- | --- |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to develop and send pull requests |
+| [SECURITY.md](SECURITY.md) | How to report vulnerabilities and keep secrets out of git |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Community rules |
+| [deploy/README.md](deploy/README.md) | nginx + systemd on a VPS |
+| [docs/GOING_PUBLIC.md](docs/GOING_PUBLIC.md) | Owner checklist before making the GitHub repo public |
+
+## License
+
+[MIT](LICENSE)
+

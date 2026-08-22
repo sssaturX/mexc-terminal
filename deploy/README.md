@@ -1,13 +1,15 @@
 # VPS Deployment
 
-This setup runs the Node web UI on `127.0.0.1:8787` and exposes it through nginx at `mexc.moontap.space`.
+This setup runs the Node web UI on `127.0.0.1:8787` and exposes it through nginx on a hostname you control.
+
+Replace `your-hostname.example` everywhere below with your own domain. Do not commit personal hostnames, IPs, or TLS certificates.
 
 ## DNS
 
 Create an `A` record for:
 
 ```text
-mexc.moontap.space -> your VPS public IPv4
+your-hostname.example -> your VPS public IPv4
 ```
 
 Add an `AAAA` record too if the VPS has IPv6.
@@ -39,7 +41,9 @@ rsync -az --delete \
   --exclude node_modules \
   --exclude dist \
   --exclude .git \
-  ./ root@your-vps-ip:/opt/mexc-terminal/
+  --exclude .env \
+  --exclude config/settings.json \
+  ./ root@YOUR_VPS_IP:/opt/mexc-terminal/
 ```
 
 If you are already on the server, copy or extract the project into
@@ -66,6 +70,9 @@ sudo -u mexc cp .env.example .env
 sudo -u mexc nano .env
 ```
 
+Set `WEB_PUBLIC_BASE_URL` to the public HTTPS URL of this host, for example
+`https://your-hostname.example`. Notification links use that value.
+
 ## systemd
 
 ```bash
@@ -77,9 +84,11 @@ sudo systemctl status mexc-terminal-web
 
 ## nginx
 
+Edit `deploy/nginx/mexc-terminal.conf` and set `server_name` to your hostname.
+
 ```bash
-sudo cp deploy/nginx/mexc.moontap.space.conf /etc/nginx/sites-available/mexc.moontap.space
-sudo ln -s /etc/nginx/sites-available/mexc.moontap.space /etc/nginx/sites-enabled/mexc.moontap.space
+sudo cp deploy/nginx/mexc-terminal.conf /etc/nginx/sites-available/mexc-terminal
+sudo ln -s /etc/nginx/sites-available/mexc-terminal /etc/nginx/sites-enabled/mexc-terminal
 sudo nginx -t
 sudo systemctl reload nginx
 ```
@@ -87,7 +96,7 @@ sudo systemctl reload nginx
 The UI should now respond on:
 
 ```text
-http://mexc.moontap.space
+http://your-hostname.example
 ```
 
 ## HTTPS
@@ -96,7 +105,7 @@ After DNS points to the VPS and HTTP works:
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d mexc.moontap.space
+sudo certbot --nginx -d your-hostname.example
 ```
 
 ## Useful Commands

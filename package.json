@@ -32,7 +32,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "dotenv": "^16.4.7",
+    "dotenv": "^17.4.2",
     "mexc-futures-sdk": "^1.5.1",
     "prompts": "^2.4.2"
   },
